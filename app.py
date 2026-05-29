@@ -480,13 +480,13 @@ else:
                     else:
                         parse_list = lambda s: [item.strip() for item in s.split(",") if item.strip()] if s else []
                         
-                        # Extract clean string primitives
+                        # Extract string representations safely
                         val_life_stage = selected_life_stage_enum.value if hasattr(selected_life_stage_enum, 'value') else selected_life_stage_enum
                         val_living_situation = selected_living_enum.value if hasattr(selected_living_enum, 'value') else selected_living_enum
                         val_relationship_status = selected_relationship_enum.value if hasattr(selected_relationship_enum, 'value') else selected_relationship_enum
                         val_themes = [t.value if hasattr(t, 'value') else str(t) for t in themes_val]
 
-                        # Pre-generate the structural dictionary payload natively
+                        # Build a clean primitive dictionary matching the exact schema shape
                         raw_profile_dict = {
                             "name": st.session_state.display_name,
                             "baseline": {
@@ -509,21 +509,30 @@ else:
                             "additional_notes": additional_notes_val if additional_notes_val else None
                         }
 
-                        # Set descriptive metadata tags 
+                        # Save strings in state cache for pristine logging
                         theme_labels = ", ".join([t.split(" (")[0] for t in val_themes])
                         st.session_state.active_summary_label = f"{val_life_stage} | {theme_labels}"
                         st.session_state.active_raw_profile = raw_profile_dict
 
-                        # Construct structural schemas for endpoint streaming
-                        baseline_profile = BaselineProfile.model_construct(**raw_profile_dict["baseline"])
-                        relationships_profile = RelationshipProfile.model_construct(**raw_profile_dict["relationships"])
-                        outlets_profile = OutletsProfile.model_construct(**raw_profile_dict["outlets"])
-
-                        profile = UserContextProfile.model_construct(
+                        # FIX: Instantiate top-level model directly using sub-models built out of validated mapping forms
+                        profile = UserContextProfile(
                             name=st.session_state.display_name,
-                            baseline=baseline_profile,
-                            relationships=relationships_profile,
-                            outlets=outlets_profile,
+                            baseline=BaselineProfile(
+                                life_stage=selected_life_stage_enum,
+                                living_situation=selected_living_enum,
+                                professional_focus=prof_focus_val
+                            ),
+                            relationships=RelationshipProfile(
+                                status=selected_relationship_enum,
+                                has_dependents=has_dep_val,
+                                custody_details=custody_details_val if custody_details_val else None,
+                                key_pillars=parse_list(key_pillars_input)
+                            ),
+                            outlets=OutletsProfile(
+                                creative_technical=parse_list(creative_val),
+                                recreation_unwinding=parse_list(recreation_val),
+                                daily_rituals=parse_list(rituals_val)
+                            ),
                             primary_themes=themes_val,
                             additional_notes=additional_notes_val if additional_notes_val else None
                         )
@@ -566,7 +575,6 @@ else:
                         ai_response = PromptEngine.execute_google_inference(profile, model_name="gemini-2.5-flash")
                         st.session_state.current_response = ai_response
                         
-                        # Pass the native primitive types to ensure a clean encrypted file write
                         save_session_to_history(
                             st.session_state.user_id, 
                             st.session_state.active_summary_label,
