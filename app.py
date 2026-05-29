@@ -484,16 +484,31 @@ else:
                     else:
                         parse_list = lambda s: [item.strip() for item in s.split(",") if item.strip()] if s else []
                         
-                        # Type-safe parsing avoids the validation engine mapping mismatch
+                        # Dynamic extraction layer to handle either raw text values or complex type mappings safely
+                        raw_life_stage = selected_life_stage_enum.value if hasattr(selected_life_stage_enum, 'value') else selected_life_stage_enum
+                        raw_living_situation = selected_living_enum.value if hasattr(selected_living_enum, 'value') else selected_living_enum
+                        raw_relationship_status = selected_relationship_enum.value if hasattr(selected_relationship_enum, 'value') else selected_relationship_enum
+                        
+                        cleaned_themes = []
+                        for t in themes_val:
+                            if hasattr(t, 'value'):
+                                cleaned_themes.append(t)
+                            else:
+                                try:
+                                    cleaned_themes.append(LifeTheme(t))
+                                except ValueError:
+                                    cleaned_themes.append(t)
+                        
+                        # Generate validated profile structure securely
                         profile = UserContextProfile(
                             name=st.session_state.display_name,
                             baseline=BaselineProfile(
-                                life_stage=selected_life_stage_enum,
-                                living_situation=selected_living_enum,
+                                life_stage=raw_life_stage,
+                                living_situation=raw_living_situation,
                                 professional_focus=prof_focus_val
                             ),
                             relationships=RelationshipProfile(
-                                status=selected_relationship_enum,
+                                status=raw_relationship_status,
                                 has_dependents=has_dep_val,
                                 custody_details=custody_details_val if custody_details_val else None,
                                 key_pillars=parse_list(key_pillars_input)
@@ -503,22 +518,22 @@ else:
                                 recreation_unwinding=parse_list(recreation_val),
                                 daily_rituals=parse_list(rituals_val)
                             ),
-                            primary_themes=[LifeTheme(t) for t in themes_val],
+                            primary_themes=cleaned_themes,
                             additional_notes=additional_notes_val if additional_notes_val else None
                         )
                         
                         st.session_state.form_defaults = {
-                            "life_stage": selected_life_stage_enum.value,
-                            "living_situation": selected_living_enum.value,
+                            "life_stage": raw_life_stage,
+                            "living_situation": raw_living_situation,
                             "professional_focus": prof_focus_val,
-                            "relationship_status": selected_relationship_enum.value,
+                            "relationship_status": raw_relationship_status,
                             "has_dependents": has_dep_val,
                             "custody_details": custody_details_val,
                             "key_pillars": key_pillars_input,
                             "creative": creative_val,
                             "recreation": recreation_val,
                             "rituals": rituals_val,
-                            "themes": themes_val,
+                            "themes": [t.value if hasattr(t, 'value') else t for t in themes_val],
                             "additional_notes": additional_notes_val
                         }
                         
