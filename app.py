@@ -177,7 +177,7 @@ def save_session_to_history(user_id, profile: UserContextProfile, curated_questi
     """Formats, encrypts, and appends a newly generated reflection session to the JSON file."""
     history = load_history()
     
-    # Safely pull the theme value text string
+    # Safely pull values out of enums or text elements natively
     theme_labels = ", ".join([t.value.split(" (")[0] if hasattr(t, 'value') else str(t).split(" (")[0] for t in profile.primary_themes])
     baseline_stage = profile.baseline.life_stage.value if hasattr(profile.baseline.life_stage, 'value') else str(profile.baseline.life_stage)
     summary_label = f"{baseline_stage} | {theme_labels}"
@@ -190,7 +190,29 @@ def save_session_to_history(user_id, profile: UserContextProfile, curated_questi
             "insight_trigger": q.insight_trigger
         })
 
-    profile_dict = profile.model_dump()
+    # FIX: Explicit structural primitive dictionary conversion completely drops Pydantic dependency hurdles
+    profile_dict = {
+        "name": profile.name,
+        "baseline": {
+            "life_stage": profile.baseline.life_stage.value if hasattr(profile.baseline.life_stage, "value") else str(profile.baseline.life_stage),
+            "living_situation": profile.baseline.living_situation.value if hasattr(profile.baseline.living_situation, "value") else str(profile.baseline.living_situation),
+            "professional_focus": profile.baseline.professional_focus
+        },
+        "relationships": {
+            "status": profile.relationships.status.value if hasattr(profile.relationships.status, "value") else str(profile.relationships.status),
+            "has_dependents": profile.relationships.has_dependents,
+            "custody_details": profile.relationships.custody_details,
+            "key_pillars": profile.relationships.key_pillars
+        },
+        "outlets": {
+            "creative_technical": profile.outlets.creative_technical,
+            "recreation_unwinding": profile.outlets.recreation_unwinding,
+            "daily_rituals": profile.outlets.daily_rituals
+        },
+        "primary_themes": [t.value if hasattr(t, "value") else str(t) for t in profile.primary_themes],
+        "additional_notes": profile.additional_notes
+    }
+    
     journal_entries_dict = {}
 
     enc_profile = encrypt_data(profile_dict, key_str)
@@ -270,7 +292,7 @@ def format_export_markdown(session, user_name) -> str:
 # ==========================================
 st.set_page_config(page_title="ContextAI", page_icon="🧩", layout="centered")
 
-# Initialize persistent users log directly on app boot
+# Warm initialize users file on startup to look up credentials securely across server reboots
 existing_users = load_users()
 
 # Track authentication status
@@ -508,22 +530,20 @@ else:
                             "daily_rituals": parse_list(rituals_val)
                         }
 
-                        # CRITICAL FIX: Use .model_construct() to skip strict type coercion for localized schemas
+                        # Construct models using model_construct to skip validation safely
                         baseline_profile = BaselineProfile.model_construct(**baseline_dict)
                         relationships_profile = RelationshipProfile.model_construct(**relationships_dict)
                         outlets_profile = OutletsProfile.model_construct(**outlets_dict)
 
-                        # Form the master context schema smoothly without validation errors
                         profile = UserContextProfile.model_construct(
                             name=st.session_state.display_name,
                             baseline=baseline_profile,
                             relationships=relationships_profile,
                             outlets=outlets_profile,
-                            primary_themes=themes_val,  # Pass active enums to engine
+                            primary_themes=themes_val,
                             additional_notes=additional_notes_val if additional_notes_val else None
                         )
                         
-                        # Store properties as primitives for continuous state reload retention
                         st.session_state.form_defaults = {
                             "life_stage": val_life_stage,
                             "living_situation": val_living_situation,
