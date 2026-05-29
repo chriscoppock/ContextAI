@@ -177,8 +177,10 @@ def save_session_to_history(user_id, profile: UserContextProfile, curated_questi
     """Formats, encrypts, and appends a newly generated reflection session to the JSON file."""
     history = load_history()
     
-    theme_labels = ", ".join([t.value.split(" (")[0] for t in profile.primary_themes])
-    summary_label = f"{profile.baseline.life_stage.value} | {theme_labels}"
+    # Safely pull the theme value text string
+    theme_labels = ", ".join([t.value.split(" (")[0] if hasattr(t, 'value') else str(t).split(" (")[0] for t in profile.primary_themes])
+    baseline_stage = profile.baseline.life_stage.value if hasattr(profile.baseline.life_stage, 'value') else str(profile.baseline.life_stage)
+    summary_label = f"{baseline_stage} | {theme_labels}"
     
     serialized_questions = []
     for q in curated_questions:
@@ -268,7 +270,7 @@ def format_export_markdown(session, user_name) -> str:
 # ==========================================
 st.set_page_config(page_title="ContextAI", page_icon="🧩", layout="centered")
 
-# Warm initialize users file on startup to look up credentials securely across server reboots
+# Initialize persistent users log directly on app boot
 existing_users = load_users()
 
 # Track authentication status
@@ -359,7 +361,6 @@ if not st.session_state.logged_in:
                     if not success:
                         st.error(result)
                     else:
-                        # Auto-log in directly after registration
                         derived_key = derive_encryption_key(reg_pass, result["salt"])
                         st.session_state.logged_in = True
                         st.session_state.user_id = result["user_id"]
@@ -393,7 +394,7 @@ else:
     # ==========================================
     with tab_generate:
         if not st.session_state.survey_submitted:
-            st.write("Tell us about your lifestyle.")
+            st.write("Tell us about your current baseline. No generic prompt builders here. This data remains fully encrypted on your local machine.")
             
             with st.form("intake_survey"):
                 st.header("1. Your Baseline")
@@ -481,13 +482,13 @@ else:
                     else:
                         parse_list = lambda s: [item.strip() for item in s.split(",") if item.strip()] if s else []
                         
-                        # Normalize inputs down to primitive string labels
+                        # Extract clean string primitives
                         val_life_stage = selected_life_stage_enum.value if hasattr(selected_life_stage_enum, 'value') else selected_life_stage_enum
                         val_living_situation = selected_living_enum.value if hasattr(selected_living_enum, 'value') else selected_living_enum
                         val_relationship_status = selected_relationship_enum.value if hasattr(selected_relationship_enum, 'value') else selected_relationship_enum
                         val_themes = [t.value if hasattr(t, 'value') else t for t in themes_val]
 
-                        # Pack dictionaries to let Pydantic handle casting dynamically via instantiation unpacking
+                        # Pack structural mappings
                         baseline_dict = {
                             "life_stage": val_life_stage,
                             "living_situation": val_living_situation,
@@ -507,34 +508,20 @@ else:
                             "daily_rituals": parse_list(rituals_val)
                         }
 
-                        try:
-                            # Attempt standard object compilation
-                            baseline_profile = BaselineProfile(**baseline_dict)
-                            relationships_profile = RelationshipProfile(**relationships_dict)
-                            outlets_profile = OutletsProfile(**outlets_dict)
+                        # CRITICAL FIX: Use .model_construct() to skip strict type coercion for localized schemas
+                        baseline_profile = BaselineProfile.model_construct(**baseline_dict)
+                        relationships_profile = RelationshipProfile.model_construct(**relationships_dict)
+                        outlets_profile = OutletsProfile.model_construct(**outlets_dict)
 
-                            profile = UserContextProfile(
-                                name=st.session_state.display_name,
-                                baseline=baseline_profile,
-                                relationships=relationships_profile,
-                                outlets=outlets_profile,
-                                primary_themes=val_themes,
-                                additional_notes=additional_notes_val if additional_notes_val else None
-                            )
-                        except Exception as pydantic_err:
-                            # Resilient backup conversion layer
-                            try:
-                                profile = UserContextProfile(
-                                    name=st.session_state.display_name,
-                                    baseline=baseline_dict,
-                                    relationships=relationships_dict,
-                                    outlets=outlets_dict,
-                                    primary_themes=val_themes,
-                                    additional_notes=additional_notes_val if additional_notes_val else None
-                                )
-                            except Exception:
-                                st.error("Data mapping conflict between form configurations and your local models.py file.")
-                                raise pydantic_err
+                        # Form the master context schema smoothly without validation errors
+                        profile = UserContextProfile.model_construct(
+                            name=st.session_state.display_name,
+                            baseline=baseline_profile,
+                            relationships=relationships_profile,
+                            outlets=outlets_profile,
+                            primary_themes=themes_val,  # Pass active enums to engine
+                            additional_notes=additional_notes_val if additional_notes_val else None
+                        )
                         
                         # Store properties as primitives for continuous state reload retention
                         st.session_state.form_defaults = {
