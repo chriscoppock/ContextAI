@@ -73,7 +73,7 @@ def decrypt_data(encrypted_str: str, key_str: str):
 # USER ACCOUNTS & DATABASE FILE MANAGEMENT
 # ==========================================
 def load_users():
-    """Loads current credential registry."""
+    """Loads current credential registry from local disk storage."""
     if not os.path.exists(USERS_FILE):
         return {}
     try:
@@ -268,7 +268,7 @@ def format_export_markdown(session, user_name) -> str:
 # ==========================================
 st.set_page_config(page_title="ContextAI", page_icon="🧩", layout="centered")
 
-# Warm initialize users configuration file to maintain disk persistence
+# Warm initialize users file on startup to look up credentials securely across server reboots
 existing_users = load_users()
 
 # Track authentication status
@@ -359,6 +359,7 @@ if not st.session_state.logged_in:
                     if not success:
                         st.error(result)
                     else:
+                        # Auto-log in directly after registration
                         derived_key = derive_encryption_key(reg_pass, result["salt"])
                         st.session_state.logged_in = True
                         st.session_state.user_id = result["user_id"]
@@ -397,10 +398,8 @@ else:
             with st.form("intake_survey"):
                 st.header("1. Your Baseline")
                 
-                # Setup options from Enum list
                 life_stage_options = list(LifeStage)
                 try:
-                    # Resolve previous string values back to full Enum members safely
                     stored_stage_str = st.session_state.form_defaults["life_stage"]
                     default_life_stage = next((e for e in life_stage_options if e.value == stored_stage_str), life_stage_options[0])
                     default_life_stage_idx = life_stage_options.index(default_life_stage)
@@ -460,7 +459,6 @@ else:
                 
                 st.header("4. Core Focus")
                 
-                # Handle multi-select options map safely
                 theme_options = list(LifeTheme)
                 stored_themes = st.session_state.form_defaults["themes"]
                 default_themes = [t for t in theme_options if t.value in stored_themes or t in stored_themes]
@@ -483,42 +481,74 @@ else:
                     else:
                         parse_list = lambda s: [item.strip() for item in s.split(",") if item.strip()] if s else []
                         
-                        # Direct assignment of Enum members guarantees validation compliance
-                        profile = UserContextProfile(
-                            name=st.session_state.display_name,
-                            baseline=BaselineProfile(
-                                life_stage=selected_life_stage_enum,
-                                living_situation=selected_living_enum,
-                                professional_focus=prof_focus_val
-                            ),
-                            relationships=RelationshipProfile(
-                                status=selected_relationship_enum,
-                                has_dependents=has_dep_val,
-                                custody_details=custody_details_val if custody_details_val else None,
-                                key_pillars=parse_list(key_pillars_input)
-                            ),
-                            outlets=OutletsProfile(
-                                creative_technical=parse_list(creative_val),
-                                recreation_unwinding=parse_list(recreation_val),
-                                daily_rituals=parse_list(rituals_val)
-                            ),
-                            primary_themes=themes_val,
-                            additional_notes=additional_notes_val if additional_notes_val else None
-                        )
+                        # Normalize inputs down to primitive string labels
+                        val_life_stage = selected_life_stage_enum.value if hasattr(selected_life_stage_enum, 'value') else selected_life_stage_enum
+                        val_living_situation = selected_living_enum.value if hasattr(selected_living_enum, 'value') else selected_living_enum
+                        val_relationship_status = selected_relationship_enum.value if hasattr(selected_relationship_enum, 'value') else selected_relationship_enum
+                        val_themes = [t.value if hasattr(t, 'value') else t for t in themes_val]
+
+                        # Pack dictionaries to let Pydantic handle casting dynamically via instantiation unpacking
+                        baseline_dict = {
+                            "life_stage": val_life_stage,
+                            "living_situation": val_living_situation,
+                            "professional_focus": prof_focus_val
+                        }
                         
-                        # Store properties as primitives for perfect UI reload state
+                        relationships_dict = {
+                            "status": val_relationship_status,
+                            "has_dependents": has_dep_val,
+                            "custody_details": custody_details_val if custody_details_val else None,
+                            "key_pillars": parse_list(key_pillars_input)
+                        }
+                        
+                        outlets_dict = {
+                            "creative_technical": parse_list(creative_val),
+                            "recreation_unwinding": parse_list(recreation_val),
+                            "daily_rituals": parse_list(rituals_val)
+                        }
+
+                        try:
+                            # Attempt standard object compilation
+                            baseline_profile = BaselineProfile(**baseline_dict)
+                            relationships_profile = RelationshipProfile(**relationships_dict)
+                            outlets_profile = OutletsProfile(**outlets_dict)
+
+                            profile = UserContextProfile(
+                                name=st.session_state.display_name,
+                                baseline=baseline_profile,
+                                relationships=relationships_profile,
+                                outlets=outlets_profile,
+                                primary_themes=val_themes,
+                                additional_notes=additional_notes_val if additional_notes_val else None
+                            )
+                        except Exception as pydantic_err:
+                            # Resilient backup conversion layer
+                            try:
+                                profile = UserContextProfile(
+                                    name=st.session_state.display_name,
+                                    baseline=baseline_dict,
+                                    relationships=relationships_dict,
+                                    outlets=outlets_dict,
+                                    primary_themes=val_themes,
+                                    additional_notes=additional_notes_val if additional_notes_val else None
+                                )
+                            except Exception:
+                                st.error("Data mapping conflict between form configurations and your local models.py file.")
+                                raise pydantic_err
+                        
+                        # Store properties as primitives for continuous state reload retention
                         st.session_state.form_defaults = {
-                            "life_stage": selected_life_stage_enum.value,
-                            "living_situation": selected_living_enum.value,
+                            "life_stage": val_life_stage,
+                            "living_situation": val_living_situation,
                             "professional_focus": prof_focus_val,
-                            "relationship_status": selected_relationship_enum.value,
+                            "relationship_status": val_relationship_status,
                             "has_dependents": has_dep_val,
                             "custody_details": custody_details_val,
                             "key_pillars": key_pillars_input,
                             "creative": creative_val,
                             "recreation": recreation_val,
                             "rituals": rituals_val,
-                            "themes": [t.value for t in themes_val],
+                            "themes": val_themes,
                             "additional_notes": additional_notes_val
                         }
                         
