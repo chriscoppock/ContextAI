@@ -173,14 +173,9 @@ def load_and_decrypt_history(active_user_id, key_str):
                 
     return user_history
 
-def save_session_to_history(user_id, profile: UserContextProfile, curated_questions, key_str):
+def save_session_to_history(user_id, summary_label, raw_profile_dict, curated_questions, key_str):
     """Formats, encrypts, and appends a newly generated reflection session to the JSON file."""
     history = load_history()
-    
-    # Safely pull values out of enums or text elements natively
-    theme_labels = ", ".join([t.value.split(" (")[0] if hasattr(t, 'value') else str(t).split(" (")[0] for t in profile.primary_themes])
-    baseline_stage = profile.baseline.life_stage.value if hasattr(profile.baseline.life_stage, 'value') else str(profile.baseline.life_stage)
-    summary_label = f"{baseline_stage} | {theme_labels}"
     
     serialized_questions = []
     for q in curated_questions:
@@ -190,32 +185,9 @@ def save_session_to_history(user_id, profile: UserContextProfile, curated_questi
             "insight_trigger": q.insight_trigger
         })
 
-    # FIX: Explicit structural primitive dictionary conversion completely drops Pydantic dependency hurdles
-    profile_dict = {
-        "name": profile.name,
-        "baseline": {
-            "life_stage": profile.baseline.life_stage.value if hasattr(profile.baseline.life_stage, "value") else str(profile.baseline.life_stage),
-            "living_situation": profile.baseline.living_situation.value if hasattr(profile.baseline.living_situation, "value") else str(profile.baseline.living_situation),
-            "professional_focus": profile.baseline.professional_focus
-        },
-        "relationships": {
-            "status": profile.relationships.status.value if hasattr(profile.relationships.status, "value") else str(profile.relationships.status),
-            "has_dependents": profile.relationships.has_dependents,
-            "custody_details": profile.relationships.custody_details,
-            "key_pillars": profile.relationships.key_pillars
-        },
-        "outlets": {
-            "creative_technical": profile.outlets.creative_technical,
-            "recreation_unwinding": profile.outlets.recreation_unwinding,
-            "daily_rituals": profile.outlets.daily_rituals
-        },
-        "primary_themes": [t.value if hasattr(t, "value") else str(t) for t in profile.primary_themes],
-        "additional_notes": profile.additional_notes
-    }
-    
     journal_entries_dict = {}
 
-    enc_profile = encrypt_data(profile_dict, key_str)
+    enc_profile = encrypt_data(raw_profile_dict, key_str)
     enc_questions = encrypt_data(serialized_questions, key_str)
     enc_journals = encrypt_data(journal_entries_dict, key_str)
 
@@ -314,6 +286,10 @@ if "user_profile" not in st.session_state:
     st.session_state.user_profile = None
 if "current_response" not in st.session_state:
     st.session_state.current_response = None
+if "active_summary_label" not in st.session_state:
+    st.session_state.active_summary_label = ""
+if "active_raw_profile" not in st.session_state:
+    st.session_state.active_raw_profile = {}
 
 # Memory Retention Profile Dictionary Setup
 if "form_defaults" not in st.session_state:
@@ -508,32 +484,40 @@ else:
                         val_life_stage = selected_life_stage_enum.value if hasattr(selected_life_stage_enum, 'value') else selected_life_stage_enum
                         val_living_situation = selected_living_enum.value if hasattr(selected_living_enum, 'value') else selected_living_enum
                         val_relationship_status = selected_relationship_enum.value if hasattr(selected_relationship_enum, 'value') else selected_relationship_enum
-                        val_themes = [t.value if hasattr(t, 'value') else t for t in themes_val]
+                        val_themes = [t.value if hasattr(t, 'value') else str(t) for t in themes_val]
 
-                        # Pack structural mappings
-                        baseline_dict = {
-                            "life_stage": val_life_stage,
-                            "living_situation": val_living_situation,
-                            "professional_focus": prof_focus_val
-                        }
-                        
-                        relationships_dict = {
-                            "status": val_relationship_status,
-                            "has_dependents": has_dep_val,
-                            "custody_details": custody_details_val if custody_details_val else None,
-                            "key_pillars": parse_list(key_pillars_input)
-                        }
-                        
-                        outlets_dict = {
-                            "creative_technical": parse_list(creative_val),
-                            "recreation_unwinding": parse_list(recreation_val),
-                            "daily_rituals": parse_list(rituals_val)
+                        # Pre-generate the structural dictionary payload natively
+                        raw_profile_dict = {
+                            "name": st.session_state.display_name,
+                            "baseline": {
+                                "life_stage": val_life_stage,
+                                "living_situation": val_living_situation,
+                                "professional_focus": prof_focus_val
+                            },
+                            "relationships": {
+                                "status": val_relationship_status,
+                                "has_dependents": has_dep_val,
+                                "custody_details": custody_details_val if custody_details_val else None,
+                                "key_pillars": parse_list(key_pillars_input)
+                            },
+                            "outlets": {
+                                "creative_technical": parse_list(creative_val),
+                                "recreation_unwinding": parse_list(recreation_val),
+                                "daily_rituals": parse_list(rituals_val)
+                            },
+                            "primary_themes": val_themes,
+                            "additional_notes": additional_notes_val if additional_notes_val else None
                         }
 
-                        # Construct models using model_construct to skip validation safely
-                        baseline_profile = BaselineProfile.model_construct(**baseline_dict)
-                        relationships_profile = RelationshipProfile.model_construct(**relationships_dict)
-                        outlets_profile = OutletsProfile.model_construct(**outlets_dict)
+                        # Set descriptive metadata tags 
+                        theme_labels = ", ".join([t.split(" (")[0] for t in val_themes])
+                        st.session_state.active_summary_label = f"{val_life_stage} | {theme_labels}"
+                        st.session_state.active_raw_profile = raw_profile_dict
+
+                        # Construct structural schemas for endpoint streaming
+                        baseline_profile = BaselineProfile.model_construct(**raw_profile_dict["baseline"])
+                        relationships_profile = RelationshipProfile.model_construct(**raw_profile_dict["relationships"])
+                        outlets_profile = OutletsProfile.model_construct(**raw_profile_dict["outlets"])
 
                         profile = UserContextProfile.model_construct(
                             name=st.session_state.display_name,
@@ -582,9 +566,11 @@ else:
                         ai_response = PromptEngine.execute_google_inference(profile, model_name="gemini-2.5-flash")
                         st.session_state.current_response = ai_response
                         
+                        # Pass the native primitive types to ensure a clean encrypted file write
                         save_session_to_history(
                             st.session_state.user_id, 
-                            profile, 
+                            st.session_state.active_summary_label,
+                            st.session_state.active_raw_profile,
                             ai_response.curated_questions,
                             st.session_state.encryption_key
                         )
