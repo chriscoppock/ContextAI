@@ -95,7 +95,6 @@ def register_user(username, display_name, password):
     if clean_username in users:
         return False, "Username is already taken."
         
-    # Generate an isolated secure salt for password verification and key derivation
     salt = os.urandom(16)
     salt_hex = salt.hex()
     
@@ -125,7 +124,6 @@ def authenticate_user(username, password):
     target_hash = hash_password(password, salt_hex)
     
     if target_hash == user_record["password_hash"]:
-        # Derives the encryption key on-the-fly. NEVER saved on disk!
         encryption_key = derive_encryption_key(password, salt_hex)
         return {
             "user_id": user_record["user_id"],
@@ -155,9 +153,7 @@ def load_and_decrypt_history(active_user_id, key_str):
     user_history = []
     
     for entry in raw_history:
-        # Strict user isolation
         if entry.get("user_id") == active_user_id:
-            # Check if this entry is encrypted
             if entry.get("is_encrypted", False):
                 try:
                     entry["profile_details"] = decrypt_data(entry["profile_details"], key_str)
@@ -172,7 +168,6 @@ def load_and_decrypt_history(active_user_id, key_str):
                     entry["decryption_failed"] = True
                     user_history.append(entry)
             else:
-                # Handle plain-text legacy data from older sessions safely
                 entry["is_encrypted_runtime"] = False
                 user_history.append(entry)
                 
@@ -196,7 +191,6 @@ def save_session_to_history(user_id, profile: UserContextProfile, curated_questi
     profile_dict = profile.model_dump()
     journal_entries_dict = {}
 
-    # Symmetric encryption of all sensitive data before write
     enc_profile = encrypt_data(profile_dict, key_str)
     enc_questions = encrypt_data(serialized_questions, key_str)
     enc_journals = encrypt_data(journal_entries_dict, key_str)
@@ -223,7 +217,6 @@ def update_journal_entry(session_id, question_idx, answer_text, key_str):
     history = load_history()
     for session in history:
         if session["id"] == session_id:
-            # 1. Read existing answers (decrypting first if encrypted)
             if session.get("is_encrypted", False):
                 try:
                     current_journals = decrypt_data(session["journal_entries"], key_str)
@@ -232,14 +225,11 @@ def update_journal_entry(session_id, question_idx, answer_text, key_str):
             else:
                 current_journals = session.get("journal_entries", {})
 
-            # 2. Apply new changes
             current_journals[str(question_idx)] = answer_text
 
-            # 3. Encrypt and pack back onto local disk
             if session.get("is_encrypted", False):
                 session["journal_entries"] = encrypt_data(current_journals, key_str)
             else:
-                # Automatic Encryption Upgrade: If saving old legacy data, encrypt all of it!
                 session["profile_details"] = encrypt_data(session["profile_details"], key_str)
                 session["questions"] = encrypt_data(session["questions"], key_str)
                 session["journal_entries"] = encrypt_data(current_journals, key_str)
@@ -278,6 +268,9 @@ def format_export_markdown(session, user_name) -> str:
 # ==========================================
 st.set_page_config(page_title="ContextAI", page_icon="🧩", layout="centered")
 
+# Warm initialize users configuration file to maintain disk persistence
+existing_users = load_users()
+
 # Track authentication status
 if "logged_in" not in st.session_state:
     st.session_state.logged_in = False
@@ -298,7 +291,7 @@ if "user_profile" not in st.session_state:
 if "current_response" not in st.session_state:
     st.session_state.current_response = None
 
-# Memory Retention Profile Dictionary
+# Memory Retention Profile Dictionary Setup
 if "form_defaults" not in st.session_state:
     st.session_state.form_defaults = {
         "life_stage": list(LifeStage)[0].value if list(LifeStage) else "",
@@ -366,7 +359,6 @@ if not st.session_state.logged_in:
                     if not success:
                         st.error(result)
                     else:
-                        # Auto-log in directly after registration
                         derived_key = derive_encryption_key(reg_pass, result["salt"])
                         st.session_state.logged_in = True
                         st.session_state.user_id = result["user_id"]
@@ -380,12 +372,11 @@ if not st.session_state.logged_in:
 # SECURE LOGGED-IN PLATFORM WORKSPACE
 # ==========================================
 else:
-    # Sidebar dashboard controls
+    # Sidebar controls
     st.sidebar.title("🔒 Sandbox Locked")
     st.sidebar.markdown(f"**Operator:** {st.session_state.display_name}")
     st.sidebar.caption(f"Zero-Knowledge Mode Active (AES-256)")
     
-    # Complete, state-safe Logout
     if st.sidebar.button("Logout of Workspace"):
         for key in list(st.session_state.keys()):
             del st.session_state[key]
@@ -394,7 +385,6 @@ else:
     st.title("🧩 ContextAI")
     st.subheader(f"Questions shaped by your story, {st.session_state.display_name}.")
     
-    # Master dashboard Tabs
     tab_generate, tab_history = st.tabs(["✨ Generate Reflections", "📚 Saved Journals & History"])
 
     # ==========================================
@@ -407,12 +397,14 @@ else:
             with st.form("intake_survey"):
                 st.header("1. Your Baseline")
                 
-                # Type-Safe Life Stage Selectbox Configuration
+                # Setup options from Enum list
                 life_stage_options = list(LifeStage)
                 try:
-                    default_life_stage = LifeStage(st.session_state.form_defaults["life_stage"])
+                    # Resolve previous string values back to full Enum members safely
+                    stored_stage_str = st.session_state.form_defaults["life_stage"]
+                    default_life_stage = next((e for e in life_stage_options if e.value == stored_stage_str), life_stage_options[0])
                     default_life_stage_idx = life_stage_options.index(default_life_stage)
-                except (ValueError, KeyError):
+                except Exception:
                     default_life_stage_idx = 0
 
                 selected_life_stage_enum = st.selectbox(
@@ -422,12 +414,12 @@ else:
                     format_func=lambda e: e.value
                 )
                 
-                # Type-Safe Living Situation Selectbox Configuration
                 living_options = list(LivingSituation)
                 try:
-                    default_living = LivingSituation(st.session_state.form_defaults["living_situation"])
+                    stored_living_str = st.session_state.form_defaults["living_situation"]
+                    default_living = next((e for e in living_options if e.value == stored_living_str), living_options[0])
                     default_living_idx = living_options.index(default_living)
-                except (ValueError, KeyError):
+                except Exception:
                     default_living_idx = 0
 
                 selected_living_enum = st.selectbox(
@@ -441,12 +433,12 @@ else:
                 
                 st.header("2. Relationship Architecture")
                 
-                # Type-Safe Relationship Status Selectbox Configuration
                 rel_options = list(RelationshipStatus)
                 try:
-                    default_rel = RelationshipStatus(st.session_state.form_defaults["relationship_status"])
+                    stored_rel_str = st.session_state.form_defaults["relationship_status"]
+                    default_rel = next((e for e in rel_options if e.value == stored_rel_str), rel_options[0])
                     default_rel_idx = rel_options.index(default_rel)
-                except (ValueError, KeyError):
+                except Exception:
                     default_rel_idx = 0
 
                 selected_relationship_enum = st.selectbox(
@@ -467,11 +459,18 @@ else:
                 rituals_val = st.text_input("Daily micro-rituals or habits:", value=st.session_state.form_defaults["rituals"], placeholder="e.g., Dedicated V60 coffee brewing, working out")
                 
                 st.header("4. Core Focus")
+                
+                # Handle multi-select options map safely
+                theme_options = list(LifeTheme)
+                stored_themes = st.session_state.form_defaults["themes"]
+                default_themes = [t for t in theme_options if t.value in stored_themes or t in stored_themes]
+                
                 themes_val = st.multiselect(
                     "Select up to 2 primary life themes to center your questions around:",
-                    options=[e.value for e in LifeTheme],
-                    default=st.session_state.form_defaults["themes"],
-                    max_selections=2
+                    options=theme_options,
+                    default=default_themes,
+                    max_selections=2,
+                    format_func=lambda e: e.value
                 )
                 
                 additional_notes_val = st.text_area("Any specific situational friction or context to consider?", value=st.session_state.form_defaults["additional_notes"], placeholder="Optional context...")
@@ -484,31 +483,16 @@ else:
                     else:
                         parse_list = lambda s: [item.strip() for item in s.split(",") if item.strip()] if s else []
                         
-                        # Dynamic extraction layer to handle either raw text values or complex type mappings safely
-                        raw_life_stage = selected_life_stage_enum.value if hasattr(selected_life_stage_enum, 'value') else selected_life_stage_enum
-                        raw_living_situation = selected_living_enum.value if hasattr(selected_living_enum, 'value') else selected_living_enum
-                        raw_relationship_status = selected_relationship_enum.value if hasattr(selected_relationship_enum, 'value') else selected_relationship_enum
-                        
-                        cleaned_themes = []
-                        for t in themes_val:
-                            if hasattr(t, 'value'):
-                                cleaned_themes.append(t)
-                            else:
-                                try:
-                                    cleaned_themes.append(LifeTheme(t))
-                                except ValueError:
-                                    cleaned_themes.append(t)
-                        
-                        # Generate validated profile structure securely
+                        # Direct assignment of Enum members guarantees validation compliance
                         profile = UserContextProfile(
                             name=st.session_state.display_name,
                             baseline=BaselineProfile(
-                                life_stage=raw_life_stage,
-                                living_situation=raw_living_situation,
+                                life_stage=selected_life_stage_enum,
+                                living_situation=selected_living_enum,
                                 professional_focus=prof_focus_val
                             ),
                             relationships=RelationshipProfile(
-                                status=raw_relationship_status,
+                                status=selected_relationship_enum,
                                 has_dependents=has_dep_val,
                                 custody_details=custody_details_val if custody_details_val else None,
                                 key_pillars=parse_list(key_pillars_input)
@@ -518,22 +502,23 @@ else:
                                 recreation_unwinding=parse_list(recreation_val),
                                 daily_rituals=parse_list(rituals_val)
                             ),
-                            primary_themes=cleaned_themes,
+                            primary_themes=themes_val,
                             additional_notes=additional_notes_val if additional_notes_val else None
                         )
                         
+                        # Store properties as primitives for perfect UI reload state
                         st.session_state.form_defaults = {
-                            "life_stage": raw_life_stage,
-                            "living_situation": raw_living_situation,
+                            "life_stage": selected_life_stage_enum.value,
+                            "living_situation": selected_living_enum.value,
                             "professional_focus": prof_focus_val,
-                            "relationship_status": raw_relationship_status,
+                            "relationship_status": selected_relationship_enum.value,
                             "has_dependents": has_dep_val,
                             "custody_details": custody_details_val,
                             "key_pillars": key_pillars_input,
                             "creative": creative_val,
                             "recreation": recreation_val,
                             "rituals": rituals_val,
-                            "themes": [t.value if hasattr(t, 'value') else t for t in themes_val],
+                            "themes": [t.value for t in themes_val],
                             "additional_notes": additional_notes_val
                         }
                         
