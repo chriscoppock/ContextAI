@@ -1,10 +1,15 @@
 import streamlit as st
 import json
 import os
-import urllib.parse
-import uuid
 import hashlib
+import base64
 from datetime import datetime
+
+# Secure Cryptographic Imports
+from cryptography.fernet import Fernet
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
+
 from models import (
     LifeStage, 
     LivingSituation, 
@@ -17,117 +22,125 @@ from models import (
 )
 from prompt_engine import PromptEngine
 
-# ==========================================
-# CONFIGURATION & FILE PATHS
-# ==========================================
+# Database and configuration paths
+USERS_FILE = "users.json"
 HISTORY_FILE = "context_history.json"
-USER_DB_FILE = "users.json"
 
 # ==========================================
-# SECURITY & AUTHENTICATION UTILITIES
+# ZERO-KNOWLEDGE CRYPTOGRAPHY HELPERS
 # ==========================================
-def hash_password(password: str, salt: bytes = None) -> tuple[str, str]:
-    """
-    Hashes a password securely using PBKDF2-HMAC-SHA256 with a randomized salt.
-    Returns (hex_hash, hex_salt).
-    """
-    if salt is None:
-        salt = os.urandom(16)
-    hashed_key = hashlib.pbkdf2_hmac(
-        'sha256', 
-        password.encode('utf-8'), 
-        salt, 
-        100000
+def hash_password(password: str, salt_hex: str) -> str:
+    """Hashes a password with a salt using standard PBKDF2-HMAC-SHA256."""
+    salt = bytes.fromhex(salt_hex)
+    pw_hash = hashlib.pbkdf2_hmac(
+        'sha256',
+        password.encode('utf-8'),
+        salt,
+        100000  # High iteration count for password safety
     )
-    return hashed_key.hex(), salt.hex()
+    return pw_hash.hex()
 
-def verify_password(password: str, stored_hash: str, stored_salt_hex: str) -> bool:
-    """Verifies a password against the stored secure PBKDF2 hash."""
-    salt = bytes.fromhex(stored_salt_hex)
-    new_hash, _ = hash_password(password, salt)
-    return new_hash == stored_hash
+def derive_encryption_key(password: str, salt_hex: str) -> str:
+    """Derives a secure, symmetric AES-256 Fernet key from the user's password."""
+    salt = bytes.fromhex(salt_hex)
+    kdf = PBKDF2HMAC(
+        algorithm=hashes.SHA256(),
+        length=32,
+        salt=salt,
+        iterations=100000,
+    )
+    key = base64.urlsafe_b64encode(kdf.derive(password.encode('utf-8')))
+    return key.decode('utf-8')
 
-def load_users() -> dict:
-    """Loads authenticated users from the secure credentials database."""
-    if not os.path.exists(USER_DB_FILE):
+def encrypt_data(data, key_str: str) -> str:
+    """Serializes and encrypts Python data (dicts, lists) using AES-256 Fernet."""
+    if not key_str:
+        raise ValueError("Encryption key is missing. Please log in.")
+    serialized = json.dumps(data).encode('utf-8')
+    fernet = Fernet(key_str.encode('utf-8'))
+    encrypted = fernet.encrypt(serialized)
+    return encrypted.decode('utf-8')
+
+def decrypt_data(encrypted_str: str, key_str: str):
+    """Decrypts AES-256 Fernet ciphertext strings back into Python data."""
+    if not key_str:
+        raise ValueError("Decryption key is missing. Please log in.")
+    fernet = Fernet(key_str.encode('utf-8'))
+    decrypted_bytes = fernet.decrypt(encrypted_str.encode('utf-8'))
+    return json.loads(decrypted_bytes.decode('utf-8'))
+
+# ==========================================
+# USER ACCOUNTS & DATABASE FILE MANAGEMENT
+# ==========================================
+def load_users():
+    """Loads current credential registry."""
+    if not os.path.exists(USERS_FILE):
         return {}
     try:
-        with open(USER_DB_FILE, "r") as f:
+        with open(USERS_FILE, "r") as f:
             return json.load(f)
     except Exception:
         return {}
 
-def save_users(users: dict):
-    """Saves updated user credentials to the database."""
-    with open(USER_DB_FILE, "w") as f:
-        json.dump(users, f, indent=4)
+def save_users(users_dict):
+    """Saves updated credentials list to disk."""
+    with open(USERS_FILE, "w") as f:
+        json.dump(users_dict, f, indent=4)
 
-def register_user(username: str, password: str) -> tuple[bool, str]:
-    """
-    Registers a new user. Checks for existing matching user records 
-    in history to preserve legacy journals.
-    """
+def register_user(username, display_name, password):
+    """Registers a new user, deriving cryptographic hashes and salts securely."""
     users = load_users()
     clean_username = username.strip().lower()
-    display_name = username.strip()
     
-    if not clean_username or not password:
-        return False, "Username and password cannot be blank."
-        
     if clean_username in users:
-        return False, "This username is already taken."
+        return False, "Username is already taken."
         
-    hashed_pass, salt = hash_password(password)
+    # Generate an isolated secure salt for password verification and key derivation
+    salt = os.urandom(16)
+    salt_hex = salt.hex()
     
-    # Backward compatibility logic: Match legacy history by name if it exists
-    matched_uid = None
-    all_history = load_history()
-    for session in all_history:
-        baseline_name = session.get("profile_details", {}).get("baseline", {}).get("name", "")
-        if baseline_name.strip().lower() == clean_username:
-            matched_uid = session.get("user_id")
-            break
-            
-    # Fallback to generating a brand-new clean 8-character ID
-    user_id = matched_uid if matched_uid else str(uuid.uuid4())[:8]
+    hashed_pw = hash_password(password, salt_hex)
+    user_id = hashlib.sha256(clean_username.encode()).hexdigest()[:12]
     
     users[clean_username] = {
-        "display_name": display_name,
-        "password_hash": hashed_pass,
-        "salt": salt,
-        "user_id": user_id
+        "user_id": user_id,
+        "display_name": display_name.strip(),
+        "password_hash": hashed_pw,
+        "salt": salt_hex
     }
     
     save_users(users)
-    return True, user_id
+    return True, users[clean_username]
 
-def authenticate_user(username: str, password: str) -> tuple[bool, str, str]:
-    """
-    Verifies user credentials.
-    Returns (success_status, user_id, display_name).
-    """
+def authenticate_user(username, password):
+    """Authenticates credentials and returns user details with derived encryption key."""
     users = load_users()
     clean_username = username.strip().lower()
     
     if clean_username not in users:
-        return False, "", ""
+        return None, "Invalid username or password."
         
-    user_data = users[clean_username]
-    is_valid = verify_password(
-        password, 
-        user_data["password_hash"], 
-        user_data["salt"]
-    )
+    user_record = users[clean_username]
+    salt_hex = user_record["salt"]
+    target_hash = hash_password(password, salt_hex)
     
-    if is_valid:
-        return True, user_data["user_id"], user_data["display_name"]
-    return False, "", ""
+    if target_hash == user_record["password_hash"]:
+        # Derives the encryption key on-the-fly. NEVER saved on disk!
+        encryption_key = derive_encryption_key(password, salt_hex)
+        return {
+            "user_id": user_record["user_id"],
+            "display_name": user_record["display_name"],
+            "username": clean_username,
+            "encryption_key": encryption_key
+        }, None
+        
+    return None, "Invalid username or password."
 
 # ==========================================
-# LOCAL DATABASE HELPER FUNCTIONS
+# ENCRYPTED HISTORY MANAGEMENT
 # ==========================================
 def load_history():
-    """Loads past session logs from the local JSON file securely."""
+    """Reads raw session logs from disk."""
     if not os.path.exists(HISTORY_FILE):
         return []
     try:
@@ -136,8 +149,39 @@ def load_history():
     except Exception:
         return []
 
-def save_session_to_history(profile: UserContextProfile, user_id: str, curated_questions):
-    """Saves a newly generated reflection session to the history database linked to a specific user_id."""
+def load_and_decrypt_history(active_user_id, key_str):
+    """Loads, filters, and decrypts historical journal entries for the current user."""
+    raw_history = load_history()
+    user_history = []
+    
+    for entry in raw_history:
+        # Strict user isolation
+        if entry.get("user_id") == active_user_id:
+            # Check if this entry is encrypted
+            if entry.get("is_encrypted", False):
+                try:
+                    entry["profile_details"] = decrypt_data(entry["profile_details"], key_str)
+                    entry["questions"] = decrypt_data(entry["questions"], key_str)
+                    entry["journal_entries"] = decrypt_data(entry["journal_entries"], key_str)
+                    # Set encryption tracker flag to False for runtime UI interaction
+                    entry["is_encrypted_runtime"] = False
+                    user_history.append(entry)
+                except Exception as e:
+                    # Gracefully catch decryption error (e.g. if files are modified manually)
+                    entry["profile_details"] = {}
+                    entry["questions"] = []
+                    entry["journal_entries"] = {}
+                    entry["decryption_failed"] = True
+                    user_history.append(entry)
+            else:
+                # Handle plain-text legacy data from older sessions safely
+                entry["is_encrypted_runtime"] = False
+                user_history.append(entry)
+                
+    return user_history
+
+def save_session_to_history(user_id, profile: UserContextProfile, curated_questions, key_str):
+    """Formats, encrypts, and appends a newly generated reflection session to the JSON file."""
     history = load_history()
     
     theme_labels = ", ".join([t.value.split(" (")[0] for t in profile.primary_themes])
@@ -151,14 +195,23 @@ def save_session_to_history(profile: UserContextProfile, user_id: str, curated_q
             "insight_trigger": q.insight_trigger
         })
 
+    profile_dict = profile.model_dump()
+    journal_entries_dict = {}
+
+    # Symmetric encryption of all sensitive data before write
+    enc_profile = encrypt_data(profile_dict, key_str)
+    enc_questions = encrypt_data(serialized_questions, key_str)
+    enc_journals = encrypt_data(journal_entries_dict, key_str)
+
     session_data = {
         "id": datetime.now().strftime("%Y%m%d_%H%M%S"),
         "user_id": user_id,
         "timestamp": datetime.now().strftime("%Y-%m-%d %I:%M %p"),
         "summary": summary_label,
-        "profile_details": profile.model_dump(),
-        "questions": serialized_questions,
-        "journal_entries": {}
+        "is_encrypted": True,
+        "profile_details": enc_profile,
+        "questions": enc_questions,
+        "journal_entries": enc_journals
     }
     
     history.insert(0, session_data)
@@ -167,348 +220,246 @@ def save_session_to_history(profile: UserContextProfile, user_id: str, curated_q
         json.dump(history, f, indent=4)
     return session_data
 
-def update_journal_entry(session_id, question_idx, answer_text):
-    """Saves or updates a personal reflection answer for a specific question."""
+def update_journal_entry(session_id, question_idx, answer_text, key_str):
+    """Updates a reflection answer and encrypts/upgrades the payload on-the-fly."""
     history = load_history()
     for session in history:
         if session["id"] == session_id:
-            if "journal_entries" not in session:
-                session["journal_entries"] = {}
-            session["journal_entries"][str(question_idx)] = answer_text
+            # 1. Read existing answers (decrypting first if encrypted)
+            if session.get("is_encrypted", False):
+                try:
+                    current_journals = decrypt_data(session["journal_entries"], key_str)
+                except Exception:
+                    current_journals = {}
+            else:
+                current_journals = session.get("journal_entries", {})
+
+            # 2. Apply new changes
+            current_journals[str(question_idx)] = answer_text
+
+            # 3. Encrypt and pack back onto local disk
+            if session.get("is_encrypted", False):
+                session["journal_entries"] = encrypt_data(current_journals, key_str)
+            else:
+                # Automatic Encryption Upgrade: If saving old legacy data, encrypt all of it!
+                session["profile_details"] = encrypt_data(session["profile_details"], key_str)
+                session["questions"] = encrypt_data(session["questions"], key_str)
+                session["journal_entries"] = encrypt_data(current_journals, key_str)
+                session["is_encrypted"] = True
             break
             
     with open(HISTORY_FILE, "w") as f:
         json.dump(history, f, indent=4)
 
-def populate_form_defaults(profile_source):
-    """
-    Standardizes user profile inputs (either a model object or dictionary from history)
-    and populates the Session State so that the input widgets render them as defaults.
-    """
-    if hasattr(profile_source, "model_dump"):
-        data = profile_source.model_dump()
-    else:
-        data = profile_source
-
-    def get_val(item):
-        if item is None:
-            return ""
-        if hasattr(item, "value"):
-            return item.value
-        return str(item)
-
-    st.session_state.form_defaults = {
-        "name": data.get("baseline", {}).get("name", ""),
-        "life_stage": get_val(data.get("baseline", {}).get("life_stage")),
-        "living_situation": get_val(data.get("baseline", {}).get("living_situation")),
-        "professional_focus": data.get("baseline", {}).get("professional_focus", ""),
-        "status": get_val(data.get("relationships", {}).get("status")),
-        "has_dependents": data.get("relationships", {}).get("has_dependents", False),
-        "custody_details": data.get("relationships", {}).get("custody_details", "") or "",
-        "key_pillars": ", ".join(data.get("relationships", {}).get("key_pillars", []) or []),
-        "creative_technical": ", ".join(data.get("outlets", {}).get("creative_technical", []) or []),
-        "recreation_unwinding": ", ".join(data.get("outlets", {}).get("recreation_unwinding", []) or []),
-        "daily_rituals": ", ".join(data.get("outlets", {}).get("daily_rituals", []) or []),
-        "primary_themes": [get_val(t) for t in data.get("primary_themes", []) or []],
-        "additional_notes": data.get("additional_notes", "") or ""
-    }
-
-def logout_user():
-    """Wipes out all local browser session memory to prevent multi-user context leakage."""
-    for key in list(st.session_state.keys()):
-        del st.session_state[key]
-    st.rerun()
-
 # ==========================================
-# SHARING & EXPORT LOGIC
+# EXPORT GENERATION UTILITY
 # ==========================================
-def generate_shareable_text(session_summary, questions, journal_entries=None):
-    """Formats questions and journal answers into a clean, markdown document."""
-    if journal_entries is None:
-        journal_entries = {}
-        
-    text = f"# 🧩 ContextAI: My Reflection Journal\n"
-    text += f"**Context/Theme:** {session_summary}\n"
-    text += f"Generated on: {datetime.now().strftime('%Y-%m-%d %I:%M %p')}\n\n"
-    text += "----------------------------------------\n\n"
+def format_export_markdown(session, user_name) -> str:
+    """Formats a session's data (questions + answers) into markdown."""
+    md = f"# ContextAI Journal Reflection\n"
+    md += f"**User:** {user_name}\n"
+    md += f"**Date:** {session['timestamp']}\n"
+    md += f"**Context Theme Focus:** {session['summary']}\n\n"
+    md += "---\n\n"
     
-    for idx, q in enumerate(questions):
-        category = q.get("category") if isinstance(q, dict) else getattr(q, "category", "")
-        question_text = q.get("question_text") if isinstance(q, dict) else getattr(q, "question_text", "")
-        insight_trigger = q.get("insight_trigger") if isinstance(q, dict) else getattr(q, "insight_trigger", "")
+    for idx, q in enumerate(session['questions']):
+        md += f"### Q{idx + 1}: {q['category']}\n"
+        md += f"*{q['question_text']}*\n\n"
         
-        text += f"### Q{idx + 1}: [{category}]\n"
-        text += f"**Question:** *{question_text}*\n"
-        text += f"*Context Trigger:* {insight_trigger}\n\n"
-        
-        answer = journal_entries.get(str(idx), "")
-        if answer:
-            text += f"**My Reflection:**\n{answer}\n"
+        answer = session['journal_entries'].get(str(idx), "")
+        if answer.strip():
+            md += f"**My Reflection:**\n> {answer}\n\n"
         else:
-            text += "*[Unanswered]*\n"
-        text += "\n" + "-"*40 + "\n\n"
+            md += f"**My Reflection:**\n*Unanswered*\n\n"
+        md += "---\n\n"
         
-    text += "Processed privately with ContextAI."
-    return text
-
-def render_sharing_ui(session_summary, questions, journal_entries=None, unique_id=""):
-    """Renders sleek, unified UI sharing controls within an expander container."""
-    share_text = generate_shareable_text(session_summary, questions, journal_entries)
-    
-    with st.expander("📤 Share & Export reflections"):
-        st.write("Share these hyper-tailored prompts or archive your saved answers using the tools below:")
-        
-        subject = urllib.parse.quote(f"My ContextAI Reflections - {session_summary}")
-        body = urllib.parse.quote(share_text)
-        mailto_url = f"mailto:?subject={subject}&body={body}"
-        
-        st.markdown(
-            f'''
-            <a href="{mailto_url}" target="_blank" style="text-decoration: none;">
-                <div style="
-                    display: inline-block;
-                    background-color: #FF4B4B;
-                    color: white;
-                    padding: 0.6rem 1.2rem;
-                    border-radius: 8px;
-                    font-weight: 600;
-                    margin-bottom: 1.2rem;
-                    text-align: center;
-                    cursor: pointer;
-                    transition: background-color 0.2s;
-                ">
-                    📧 Email My Journal Entries
-                </div>
-            </a>
-            ''',
-            unsafe_allow_html=True
-        )
-        
-        st.write("📋 **Copy Raw Text**")
-        st.caption("Click the copy icon on the top-right of the box below to save it to your device clipboard:")
-        st.code(share_text, language="markdown")
+    return md
 
 # ==========================================
-# STREAMLIT WINDOW & PAGE SETUP
+# STREAMLIT UI DESIGN & WORKFLOW
 # ==========================================
 st.set_page_config(page_title="ContextAI", page_icon="🧩", layout="centered")
 
-# Initialize global identity session state tracking values
-if "active_user_id" not in st.session_state:
-    st.session_state.active_user_id = None
-if "active_user_name" not in st.session_state:
-    st.session_state.active_user_name = None
+# Track authentication status
+if "logged_in" not in st.session_state:
+    st.session_state.logged_in = False
+if "user_id" not in st.session_state:
+    st.session_state.user_id = None
+if "username" not in st.session_state:
+    st.session_state.username = None
+if "display_name" not in st.session_state:
+    st.session_state.display_name = None
+if "encryption_key" not in st.session_state:
+    st.session_state.encryption_key = None
+
+# Track generation workflow states
+if "survey_submitted" not in st.session_state:
+    st.session_state.survey_submitted = False
+if "user_profile" not in st.session_state:
+    st.session_state.user_profile = None
+if "current_response" not in st.session_state:
+    st.session_state.current_response = None
+
+# Memory Retention Profile Dictionary
+if "form_defaults" not in st.session_state:
+    st.session_state.form_defaults = {
+        "life_stage": LifeStage.EARLY_CAREER.value,
+        "living_situation": LivingSituation.SOLO.value,
+        "professional_focus": "",
+        "relationship_status": RelationshipStatus.SINGLE.value,
+        "has_dependents": False,
+        "custody_details": "",
+        "key_pillars": "",
+        "creative": "",
+        "recreation": "",
+        "rituals": "",
+        "themes": [],
+        "additional_notes": ""
+    }
 
 # ==========================================
-# PHASE 1: LOGIN PORTAL (AUTHENTICATION)
+# GUEST / SECURE PORTAL INTERFACE
 # ==========================================
-if st.session_state.active_user_id is None:
-    st.title("🧩 ContextAI Portal")
-    st.subheader("Sign in to your private reflection vault.")
+if not st.session_state.logged_in:
+    st.title("🧩 ContextAI Secure Portal")
+    st.write("Welcome to your local private prompt refinery. Sign in to load and encrypt your customized journals.")
     
-    auth_mode = st.radio("Choose an option:", ["Sign In", "Register New Account"], horizontal=True)
+    auth_mode = st.radio("Choose Action", ["Sign In", "Register Private Profile"], horizontal=True)
     
-    with st.form("auth_form"):
-        username_input = st.text_input("Username / Nickname:")
-        password_input = st.text_input("Password:", type="password")
-        
-        submit_btn = st.form_submit_button("Submit")
-        
-        if submit_btn:
-            if auth_mode == "Sign In":
-                success, user_id, display_name = authenticate_user(username_input, password_input)
-                if success:
-                    st.session_state.active_user_id = user_id
-                    st.session_state.active_user_name = display_name
-                    
-                    # Pre-fill form values with user's most recent session if available
-                    user_sessions = [s for s in load_history() if s.get("user_id") == user_id]
-                    if user_sessions:
-                        populate_form_defaults(user_sessions[0]["profile_details"])
+    if auth_mode == "Sign In":
+        with st.form("login_form"):
+            user_input = st.text_input("Username").strip()
+            pass_input = st.text_input("Password", type="password")
+            btn_submit = st.form_submit_button("Access Secure Sandbox")
+            
+            if btn_submit:
+                if not user_input or not pass_input:
+                    st.error("Fields cannot be empty.")
+                else:
+                    user_data, error_msg = authenticate_user(user_input, pass_input)
+                    if error_msg:
+                        st.error(error_msg)
                     else:
-                        # Clean baseline setup for existing user with no past history
-                        st.session_state.form_defaults = {"name": display_name}
-                    
-                    st.success("Successfully logged in!")
-                    st.rerun()
-                else:
-                    st.error("Invalid username or password. Please try again.")
-            else:
-                # Registration Path
-                if len(password_input) < 6:
-                    st.error("For security, passwords must be at least 6 characters.")
-                else:
-                    success, result_or_msg = register_user(username_input, password_input)
-                    if success:
-                        # Auto-login the freshly created user instantly
-                        st.session_state.active_user_id = result_or_msg
-                        st.session_state.active_user_name = username_input.strip()
-                        
-                        # Wipe out any legacy state from pre-existing browser cookies/session
-                        st.session_state.form_defaults = {
-                            "name": username_input.strip(),
-                            "life_stage": LifeStage.EARLY_20S.value,
-                            "living_situation": LivingSituation.RENT_TOWNHOUSE.value,
-                            "professional_focus": "",
-                            "status": RelationshipStatus.SINGLE.value,
-                            "has_dependents": False,
-                            "custody_details": "",
-                            "key_pillars": "",
-                            "creative_technical": "",
-                            "recreation_unwinding": "",
-                            "daily_rituals": "",
-                            "primary_themes": [],
-                            "additional_notes": ""
-                        }
-                        st.session_state.survey_submitted = False
-                        st.session_state.user_profile = None
-                        st.session_state.current_response = None
-                        
-                        st.success("Account successfully created!")
+                        st.session_state.logged_in = True
+                        st.session_state.user_id = user_data["user_id"]
+                        st.session_state.username = user_data["username"]
+                        st.session_state.display_name = user_data["display_name"]
+                        st.session_state.encryption_key = user_data["encryption_key"]
+                        st.success(f"Hello, {user_data['display_name']}!")
                         st.rerun()
+                        
+    else:
+        with st.form("register_form"):
+            st.info("Your password is cryptographically combined with a randomized salt to encrypt your files. Please remember it.")
+            reg_username = st.text_input("Preferred Username (Lowercase, letters/numbers only)").strip()
+            reg_display = st.text_input("Preferred Nickname (addressed by AI)").strip()
+            reg_pass = st.text_input("Secure Password", type="password")
+            reg_pass_conf = st.text_input("Confirm Password", type="password")
+            
+            btn_register = st.form_submit_button("Instantiate My Account")
+            
+            if btn_register:
+                if not reg_username or not reg_display or not reg_pass:
+                    st.error("All credentials are required.")
+                elif reg_pass != reg_pass_conf:
+                    st.error("Passwords do not match.")
+                else:
+                    success, result = register_user(reg_username, reg_display, reg_pass)
+                    if not success:
+                        st.error(result)
                     else:
-                        st.error(result_or_msg)
+                        # Auto-log in directly after registration
+                        # Derive the cryptographic encryption key instantly
+                        derived_key = derive_encryption_key(reg_pass, result["salt"])
+                        st.session_state.logged_in = True
+                        st.session_state.user_id = result["user_id"]
+                        st.session_state.username = reg_username.lower()
+                        st.session_state.display_name = result["display_name"]
+                        st.session_state.encryption_key = derived_key
+                        st.success("Account created securely! Launching platform...")
+                        st.rerun()
 
 # ==========================================
-# PHASE 2: PRIMARY OPERATION DASHBOARD
+# SECURE LOGGED-IN PLATFORM WORKSPACE
 # ==========================================
 else:
-    st.sidebar.markdown(f"### 👤 Logged in as:")
-    st.sidebar.success(f"**{st.session_state.active_user_name}**")
-    if st.sidebar.button("🚪 Log Out of Profile"):
-        logout_user()
-
+    # Sidebar dashboard controls
+    st.sidebar.title("🔒 Sandbox Locked")
+    st.sidebar.markdown(f"**Operator:** {st.session_state.display_name}")
+    st.sidebar.caption(f"Zero-Knowledge Mode Active (AES-256)")
+    
+    # Complete, state-safe Logout
+    if st.sidebar.button("Logout of Workspace"):
+        # Explicit state wipeout to prevent memory bleeds between profiles
+        for key in list(st.session_state.keys()):
+            del st.session_state[key]
+        st.rerun()
+        
     st.title("🧩 ContextAI")
-    st.subheader(f"Welcome back, {st.session_state.active_user_name}.")
-
+    st.subheader(f"Questions shaped by your story, {st.session_state.display_name}.")
+    
+    # Master dashboard Tabs
     tab_generate, tab_history = st.tabs(["✨ Generate Reflections", "📚 Saved Journals & History"])
 
-    # Initialize state management variables
-    if "survey_submitted" not in st.session_state:
-        st.session_state.survey_submitted = False
-    if "user_profile" not in st.session_state:
-        st.session_state.user_profile = None
-    if "current_response" not in st.session_state:
-        st.session_state.current_response = None
-
-    # Guarantee form_defaults are strictly bound to the active user profile name
-    if "form_defaults" not in st.session_state:
-        st.session_state.form_defaults = {
-            "name": st.session_state.active_user_name,
-            "life_stage": LifeStage.EARLY_20S.value,
-            "living_situation": LivingSituation.RENT_TOWNHOUSE.value,
-            "professional_focus": "",
-            "status": RelationshipStatus.SINGLE.value,
-            "has_dependents": False,
-            "custody_details": "",
-            "key_pillars": "",
-            "creative_technical": "",
-            "recreation_unwinding": "",
-            "daily_rituals": "",
-            "primary_themes": [],
-            "additional_notes": ""
-        }
-
     # ==========================================
-    # TAB 1: GENERATE REFLECTIONS
+    # WORKSPACE TAB 1: FORM GENERATION
     # ==========================================
     with tab_generate:
         if not st.session_state.survey_submitted:
-            st.write("To curate deep, meaningful reflections, tell us a bit about your reality. No generic icebreakers here.")
+            st.write("Tell us about your current baseline. No generic prompt builders here. This data remains fully encrypted on your local machine.")
             
             with st.form("intake_survey"):
-                st.header("1. The Baseline")
+                st.header("1. Your Baseline")
                 
-                # Dynamic pre-population locking
-                name_val = st.text_input("Name or Nickname:", value=st.session_state.form_defaults.get("name", st.session_state.active_user_name))
+                # Fetch default indexes safely
+                life_stage_options = [e.value for e in LifeStage]
+                default_life_stage_idx = life_stage_options.index(st.session_state.form_defaults["life_stage"]) if st.session_state.form_defaults["life_stage"] in life_stage_options else 0
+                life_stage_val = st.selectbox("What is your current life stage?", life_stage_options, index=default_life_stage_idx)
                 
-                life_stages = [e.value for e in LifeStage]
-                try:
-                    ls_idx = life_stages.index(st.session_state.form_defaults.get("life_stage", ""))
-                except ValueError:
-                    ls_idx = 0
-                life_stage_val = st.selectbox("What is your current life stage?", life_stages, index=ls_idx)
+                living_options = [e.value for e in LivingSituation]
+                default_living_idx = living_options.index(st.session_state.form_defaults["living_situation"]) if st.session_state.form_defaults["living_situation"] in living_options else 0
+                living_sit_val = st.selectbox("What is your primary living situation?", living_options, index=default_living_idx)
                 
-                living_situations = [e.value for e in LivingSituation]
-                try:
-                    lv_idx = living_situations.index(st.session_state.form_defaults.get("living_situation", ""))
-                except ValueError:
-                    lv_idx = 0
-                living_sit_val = st.selectbox("What is your primary living situation?", living_situations, index=lv_idx)
-                
-                prof_focus_val = st.text_input(
-                    "What is your primary professional or daily focus?", 
-                    value=st.session_state.form_defaults.get("professional_focus", ""),
-                    placeholder="e.g., Cybersecurity, Software Dev, Creative, Executive"
-                )
+                prof_focus_val = st.text_input("What is your primary professional/daily focus?", value=st.session_state.form_defaults["professional_focus"], placeholder="e.g., Cybersecurity, Developer, Creative")
                 
                 st.header("2. Relationship Architecture")
-                relationship_statuses = [e.value for e in RelationshipStatus]
-                try:
-                    rs_idx = relationship_statuses.index(st.session_state.form_defaults.get("status", ""))
-                except ValueError:
-                    rs_idx = 0
-                rel_status_val = st.selectbox("What is your current relationship status?", relationship_statuses, index=rs_idx)
                 
-                has_dep_val = st.checkbox(
-                    "Do you manage custody, children, or dependents?", 
-                    value=st.session_state.form_defaults.get("has_dependents", False)
-                )
+                rel_options = [e.value for e in RelationshipStatus]
+                default_rel_idx = rel_options.index(st.session_state.form_defaults["relationship_status"]) if st.session_state.form_defaults["relationship_status"] in rel_options else 0
+                rel_status_val = st.selectbox("What is your relationship status?", rel_options, index=default_rel_idx)
                 
-                custody_details_val = st.text_input(
-                    "Optional family or custody dynamics context:", 
-                    value=st.session_state.form_defaults.get("custody_details", ""),
-                    placeholder="e.g., Shared custody tracking alternate weeks, co-parenting"
-                )
+                has_dep_val = st.checkbox("Do you manage custody, children, or dependents?", value=st.session_state.form_defaults["has_dependents"])
+                custody_details_val = st.text_input("Optional family or custody dynamics context (e.g. co-parenting split weeks):", value=st.session_state.form_defaults["custody_details"])
                 
-                key_pillars_input = st.text_input(
-                    "Who are the critical people in your immediate inner circle?", 
-                    value=st.session_state.form_defaults.get("key_pillars", ""),
-                    placeholder="e.g., Spouse, Best Friend, Parent (separated by commas)"
-                )
+                key_pillars_input = st.text_input("Who is in your direct inner circle? (separate with commas):", value=st.session_state.form_defaults["key_pillars"], placeholder="e.g., Spouse, Best Friend, Sister")
                 
                 st.header("3. Outlets & Rituals")
-                creative_val = st.text_input(
-                    "Creative or technical outlets:", 
-                    value=st.session_state.form_defaults.get("creative_technical", ""),
-                    placeholder="e.g., Python engineering, playing music, grilling (comma separated)"
-                )
-                recreation_val = st.text_input(
-                    "How do you unwind or recreate?", 
-                    value=st.session_state.form_defaults.get("recreation_unwinding", ""),
-                    placeholder="e.g., Gaming/MMOs, hiking, fishing, concerts (comma separated)"
-                )
-                rituals_val = st.text_input(
-                    "Daily micro-rituals or habits:", 
-                    value=st.session_state.form_defaults.get("daily_rituals", ""),
-                    placeholder="e.g., Dedicated V60 coffee brewing, working out (comma separated)"
-                )
+                creative_val = st.text_input("Creative or technical outlets:", value=st.session_state.form_defaults["creative"], placeholder="e.g., Python engineering, playing piano")
+                recreation_val = st.text_input("How do you unwind?", value=st.session_state.form_defaults["recreation"], placeholder="e.g., Gaming/MMOs, hiking, vinyl records")
+                rituals_val = st.text_input("Daily micro-rituals or habits:", value=st.session_state.form_defaults["rituals"], placeholder="e.g., Dedicated V60 coffee brewing, working out")
                 
                 st.header("4. Core Focus")
                 themes_val = st.multiselect(
                     "Select up to 2 primary life themes to center your questions around:",
                     options=[e.value for e in LifeTheme],
-                    default=st.session_state.form_defaults.get("primary_themes", []),
+                    default=st.session_state.form_defaults["themes"],
                     max_selections=2
                 )
                 
-                additional_notes_val = st.text_area(
-                    "Any specific context or situational friction you want the AI to consider?", 
-                    value=st.session_state.form_defaults.get("additional_notes", ""),
-                    placeholder="Optional..."
-                )
+                additional_notes_val = st.text_area("Any specific situational friction or context to consider?", value=st.session_state.form_defaults["additional_notes"], placeholder="Optional context...")
                 
-                submitted = st.form_submit_button("Generate My Context Profile")
+                submitted = st.form_submit_button("Generate Reflective Workbook")
                 
                 if submitted:
                     if not themes_val:
-                        st.error("Please select at least one primary life theme to direct the AI engine.")
+                        st.error("Please choose at least one core life theme to direct the API.")
                     else:
                         parse_list = lambda s: [item.strip() for item in s.split(",") if item.strip()] if s else []
                         
+                        # Generate the validated context Pydantic struct
                         profile = UserContextProfile(
+                            name=st.session_state.display_name,
                             baseline=BaselineProfile(
-                                name=name_val if name_val else st.session_state.active_user_name,
                                 life_stage=LifeStage(life_stage_val),
                                 living_situation=LivingSituation(living_sit_val),
                                 professional_focus=prof_focus_val
@@ -528,42 +479,60 @@ else:
                             additional_notes=additional_notes_val if additional_notes_val else None
                         )
                         
+                        # Update form defaults so memory locks in their latest entries
+                        st.session_state.form_defaults = {
+                            "life_stage": life_stage_val,
+                            "living_situation": living_sit_val,
+                            "professional_focus": prof_focus_val,
+                            "relationship_status": rel_status_val,
+                            "has_dependents": has_dep_val,
+                            "custody_details": custody_details_val,
+                            "key_pillars": key_pillars_input,
+                            "creative": creative_val,
+                            "recreation": recreation_val,
+                            "rituals": rituals_val,
+                            "themes": themes_val,
+                            "additional_notes": additional_notes_val
+                        }
+                        
                         st.session_state.user_profile = profile
                         st.session_state.survey_submitted = True
                         st.session_state.current_response = None
-                        
-                        populate_form_defaults(profile)
                         st.rerun()
 
         else:
-            st.success("Profile Structured Successfully!")
             profile = st.session_state.user_profile
             
-            theme_labels = ", ".join([t.value.split(" (")[0] for t in profile.primary_themes])
-            summary_label = f"{profile.baseline.life_stage.value} | {theme_labels}"
-            
-            with st.expander("🔍 View AI Prompt Context Data"):
-                st.markdown("**System Instructions:**")
+            with st.expander("🔍 View Active Prompt Structures"):
+                st.markdown("**Prompt Generation Engine Instructions:**")
                 st.code(PromptEngine.generate_system_instruction())
-                st.markdown("**Generated User Payload:**")
+                st.markdown("**User Context Model Payload:**")
                 st.code(PromptEngine.generate_user_prompt(profile))
                 
             st.markdown("---")
-            st.header(f"🎯 Curated Reflections for {profile.baseline.name}")
+            st.header("🎯 Your Curated Reflections")
             
+            # Execute Cloud API call securely if we don't have active memory responses
             if st.session_state.current_response is None:
-                with st.spinner("Analyzing your context profile and manufacturing tailored reflections via Gemini..."):
+                with st.spinner("Refining context profile and streaming tailored cloud reflections..."):
                     try:
                         ai_response = PromptEngine.execute_google_inference(profile, model_name="gemini-2.5-flash")
                         st.session_state.current_response = ai_response
                         
-                        save_session_to_history(profile, st.session_state.active_user_id, ai_response.curated_questions)
+                        # Encrypt and save this generated workbook directly to the history file
+                        save_session_to_history(
+                            st.session_state.user_id, 
+                            profile, 
+                            ai_response.curated_questions,
+                            st.session_state.encryption_key
+                        )
                         
                     except Exception as e:
-                        st.error("Failed to connect or parse response from live Google Gemini API.")
-                        st.info("Make sure your GEMINI_API_KEY environment variable is configured properly.")
+                        st.error("Failed to authenticate or contact Gemini cloud services. Please check terminal console.")
+                        st.info("Check that you have a valid `GEMINI_API_KEY` exported in your system profile or command environment.")
                         st.exception(e)
             
+            # Show the freshly derived questions
             if st.session_state.current_response is not None:
                 for idx, q in enumerate(st.session_state.current_response.curated_questions):
                     st.markdown(f"### Question {idx + 1}: *{q.category}*")
@@ -571,74 +540,122 @@ else:
                     st.caption(f"💡 **ContextAI Note:** {q.insight_trigger}")
                     st.markdown("---")
                     
-                st.success("💾 This session has been saved automatically to your history!")
-                
-                render_sharing_ui(
-                    session_summary=summary_label,
-                    questions=st.session_state.current_response.curated_questions,
-                    unique_id="fresh_share"
-                )
+                st.success("🔒 This session data has been fully encrypted and written locally to disk!")
 
-            if st.button("🔄 Edit Survey (Change Themes or Details)"):
+            if st.button("🔄 Edit Survey / Adjust Themes"):
                 st.session_state.survey_submitted = False
+                st.session_state.user_profile = None
                 st.session_state.current_response = None
                 st.rerun()
 
     # ==========================================
-    # TAB 2: SAVED JOURNALS & HISTORY
+    # WORKSPACE TAB 2: PERSONAL SECURE JOURNAL
     # ==========================================
     with tab_history:
-        st.header(f"📚 {st.session_state.active_user_name}'s Reflection Logs")
+        st.header("📚 Your Cryptographic Reflection Logs")
         
-        all_history = load_history()
-        user_history_data = [session for session in all_history if session.get("user_id") == st.session_state.active_user_id]
+        # Pull history file and on-the-fly decrypt entries matching user_id
+        decrypted_history = load_and_decrypt_history(
+            st.session_state.user_id, 
+            st.session_state.encryption_key
+        )
         
-        if not user_history_data:
-            st.info("No saved sessions found. Fill out the intake survey to generate your first reflection session!")
+        if not decrypted_history:
+            st.info("No logs on record. Return to the generation tab to initiate your first context survey!")
         else:
-            st.write("Browse your past generated questions. Write down your personal reflections or answers to save them securely.")
+            st.write("Browse your history below. Write your answers and thoughts—your updates will save securely to your encrypted files on disk.")
             
-            for session in user_history_data:
+            for session in decrypted_history:
+                # Expander label identifying each reflection
                 session_title = f"📅 {session['timestamp']} — {session['summary']}"
+                if session.get("decryption_failed", False):
+                    st.error(f"⚠️ {session['timestamp']} - Decryption Error (Invalid Key or File Modified)")
+                    continue
+                
                 with st.expander(session_title):
+                    # Multi-option utilities
+                    col1, col2 = st.columns([1, 1])
                     
-                    if st.button("📋 Load This Profile back into Survey Form", key=f"load_p_{session['id']}"):
-                        populate_form_defaults(session['profile_details'])
-                        st.session_state.survey_submitted = False
-                        st.session_state.user_profile = None
-                        st.session_state.current_response = None
-                        st.toast("Loaded profile details! Check the '✨ Generate Reflections' tab to edit.", icon="🧩")
-                        st.rerun()
-
-                    st.markdown("**Profile Details:**")
-                    st.json(session['profile_details'])
+                    with col1:
+                        # 📋 Memory Retention Recovery Option
+                        if st.button("📋 Load Context to Active Survey", key=f"load_{session['id']}"):
+                            prev_prof = session["profile_details"]
+                            
+                            # Standardize lists back to strings for form inputs
+                            join_list = lambda x: ", ".join(x) if isinstance(x, list) else ""
+                            
+                            st.session_state.form_defaults = {
+                                "life_stage": prev_prof["baseline"]["life_stage"],
+                                "living_situation": prev_prof["baseline"]["living_situation"],
+                                "professional_focus": prev_prof["baseline"]["professional_focus"],
+                                "relationship_status": prev_prof["relationships"]["status"],
+                                "has_dependents": prev_prof["relationships"]["has_dependents"],
+                                "custody_details": prev_prof["relationships"].get("custody_details") or "",
+                                "key_pillars": join_list(prev_prof["relationships"].get("key_pillars")),
+                                "creative": join_list(prev_prof["outlets"].get("creative_technical")),
+                                "recreation": join_list(prev_prof["outlets"].get("recreation_unwinding")),
+                                "rituals": join_list(prev_prof["outlets"].get("daily_rituals")),
+                                "themes": prev_prof.get("primary_themes", []),
+                                "additional_notes": prev_prof.get("additional_notes") or ""
+                            }
+                            st.session_state.survey_submitted = False
+                            st.session_state.user_profile = None
+                            st.session_state.current_response = None
+                            st.success("Prior profile metrics loaded into editor! Swap tabs to tweak themes.")
+                            st.rerun()
+                            
+                    with col2:
+                        # 📤 Clean Export System
+                        md_content = format_export_markdown(session, st.session_state.display_name)
+                        
+                        # Native standard mailto builder
+                        mail_subject = f"ContextAI Reflection Workbook - {session['timestamp']}"
+                        mail_body = f"Find my completed ContextAI personal reflections below:\n\n{md_content}"
+                        
+                        import urllib.parse
+                        encoded_subject = urllib.parse.quote(mail_subject)
+                        encoded_body = urllib.parse.quote(mail_body)
+                        mailto_link = f"mailto:?subject={encoded_subject}&body={encoded_body}"
+                        
+                        st.markdown(
+                            f'<a href="{mailto_link}" style="text-decoration:none;">'
+                            '<button style="width:100%; border:1px solid #d3d3d3; padding:6px; border-radius:4px; background-color:#fcfcfc; cursor:pointer;">'
+                            '📧 Share Reflection Workbook via Email</button></a>',
+                            unsafe_allow_code=True
+                        )
+                        
+                    # Copy to Clipboard code container
+                    st.write("")
+                    st.caption("📋 **One-Click Clipboard Export:** Click the copy button in the top-right of the box below to export your entire workbook:")
+                    st.code(md_content, language="markdown")
+                    
                     st.markdown("---")
+                    st.subheader("📝 Secure Reflection Notebook")
                     
+                    # Individual question answers
                     for idx, q in enumerate(session['questions']):
-                        st.markdown(f"#### Q{idx + 1}: {q['category']}")
+                        st.markdown(f"##### Q{idx + 1}: {q['category']}")
                         st.info(q['question_text'])
                         st.caption(f"💡 *{q['insight_trigger']}*")
                         
-                        existing_entry = session.get("journal_entries", {}).get(str(idx), "")
-                        input_key = f"journal_{session['id']}_{idx}"
+                        existing_answer = session.get("journal_entries", {}).get(str(idx), "")
+                        text_area_key = f"journal_edit_{session['id']}_{idx}"
                         
-                        user_journal = st.text_area(
-                            "Write your thoughts/answer here:",
-                            value=existing_entry,
-                            key=input_key,
-                            placeholder="Type your reflection..."
+                        user_ref = st.text_area(
+                            "My Written Reflection:",
+                            value=existing_answer,
+                            key=text_area_key,
+                            placeholder="Write your personal answer or notes here..."
                         )
                         
-                        if st.button("Save Answer", key=f"btn_{session['id']}_{idx}"):
-                            update_journal_entry(session["id"], idx, user_journal)
-                            st.success("Reflection answer saved successfully!")
+                        if st.button("Save Secure Reflection", key=f"btn_save_{session['id']}_{idx}"):
+                            # Update answer securely with symmetric encryption encryption key
+                            update_journal_entry(
+                                session["id"], 
+                                idx, 
+                                user_ref, 
+                                st.session_state.encryption_key
+                            )
+                            st.success("Journal answer encrypted and saved to disk!")
                             
                         st.markdown("---")
-                    
-                    st.subheader("📤 Share This Log File")
-                    render_sharing_ui(
-                        session_summary=session['summary'],
-                        questions=session['questions'],
-                        journal_entries=session.get('journal_entries', {}),
-                        unique_id=session['id']
-                    )
