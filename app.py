@@ -163,11 +163,9 @@ def load_and_decrypt_history(active_user_id, key_str):
                     entry["profile_details"] = decrypt_data(entry["profile_details"], key_str)
                     entry["questions"] = decrypt_data(entry["questions"], key_str)
                     entry["journal_entries"] = decrypt_data(entry["journal_entries"], key_str)
-                    # Set encryption tracker flag to False for runtime UI interaction
                     entry["is_encrypted_runtime"] = False
                     user_history.append(entry)
                 except Exception as e:
-                    # Gracefully catch decryption error (e.g. if files are modified manually)
                     entry["profile_details"] = {}
                     entry["questions"] = []
                     entry["journal_entries"] = {}
@@ -303,10 +301,11 @@ if "current_response" not in st.session_state:
 # Memory Retention Profile Dictionary
 if "form_defaults" not in st.session_state:
     st.session_state.form_defaults = {
-        "life_stage": LifeStage.EARLY_CAREER.value,
-        "living_situation": LivingSituation.SOLO.value,
+        # Robust Dynamic Fallbacks: Grabs the exact first structural string element inside your models
+        "life_stage": list(LifeStage)[0].value if list(LifeStage) else "",
+        "living_situation": list(LivingSituation)[0].value if list(LivingSituation) else "",
         "professional_focus": "",
-        "relationship_status": RelationshipStatus.SINGLE.value,
+        "relationship_status": list(RelationshipStatus)[0].value if list(RelationshipStatus) else "",
         "has_dependents": False,
         "custody_details": "",
         "key_pillars": "",
@@ -369,7 +368,6 @@ if not st.session_state.logged_in:
                         st.error(result)
                     else:
                         # Auto-log in directly after registration
-                        # Derive the cryptographic encryption key instantly
                         derived_key = derive_encryption_key(reg_pass, result["salt"])
                         st.session_state.logged_in = True
                         st.session_state.user_id = result["user_id"]
@@ -390,7 +388,6 @@ else:
     
     # Complete, state-safe Logout
     if st.sidebar.button("Logout of Workspace"):
-        # Explicit state wipeout to prevent memory bleeds between profiles
         for key in list(st.session_state.keys()):
             del st.session_state[key]
         st.rerun()
@@ -456,7 +453,6 @@ else:
                     else:
                         parse_list = lambda s: [item.strip() for item in s.split(",") if item.strip()] if s else []
                         
-                        # Generate the validated context Pydantic struct
                         profile = UserContextProfile(
                             name=st.session_state.display_name,
                             baseline=BaselineProfile(
@@ -479,7 +475,6 @@ else:
                             additional_notes=additional_notes_val if additional_notes_val else None
                         )
                         
-                        # Update form defaults so memory locks in their latest entries
                         st.session_state.form_defaults = {
                             "life_stage": life_stage_val,
                             "living_situation": living_sit_val,
@@ -512,14 +507,12 @@ else:
             st.markdown("---")
             st.header("🎯 Your Curated Reflections")
             
-            # Execute Cloud API call securely if we don't have active memory responses
             if st.session_state.current_response is None:
                 with st.spinner("Refining context profile and streaming tailored cloud reflections..."):
                     try:
                         ai_response = PromptEngine.execute_google_inference(profile, model_name="gemini-2.5-flash")
                         st.session_state.current_response = ai_response
                         
-                        # Encrypt and save this generated workbook directly to the history file
                         save_session_to_history(
                             st.session_state.user_id, 
                             profile, 
@@ -532,7 +525,6 @@ else:
                         st.info("Check that you have a valid `GEMINI_API_KEY` exported in your system profile or command environment.")
                         st.exception(e)
             
-            # Show the freshly derived questions
             if st.session_state.current_response is not None:
                 for idx, q in enumerate(st.session_state.current_response.curated_questions):
                     st.markdown(f"### Question {idx + 1}: *{q.category}*")
@@ -554,7 +546,6 @@ else:
     with tab_history:
         st.header("📚 Your Cryptographic Reflection Logs")
         
-        # Pull history file and on-the-fly decrypt entries matching user_id
         decrypted_history = load_and_decrypt_history(
             st.session_state.user_id, 
             st.session_state.encryption_key
@@ -566,22 +557,17 @@ else:
             st.write("Browse your history below. Write your answers and thoughts—your updates will save securely to your encrypted files on disk.")
             
             for session in decrypted_history:
-                # Expander label identifying each reflection
                 session_title = f"📅 {session['timestamp']} — {session['summary']}"
                 if session.get("decryption_failed", False):
                     st.error(f"⚠️ {session['timestamp']} - Decryption Error (Invalid Key or File Modified)")
                     continue
                 
                 with st.expander(session_title):
-                    # Multi-option utilities
                     col1, col2 = st.columns([1, 1])
                     
                     with col1:
-                        # 📋 Memory Retention Recovery Option
                         if st.button("📋 Load Context to Active Survey", key=f"load_{session['id']}"):
                             prev_prof = session["profile_details"]
-                            
-                            # Standardize lists back to strings for form inputs
                             join_list = lambda x: ", ".join(x) if isinstance(x, list) else ""
                             
                             st.session_state.form_defaults = {
@@ -605,10 +591,8 @@ else:
                             st.rerun()
                             
                     with col2:
-                        # 📤 Clean Export System
                         md_content = format_export_markdown(session, st.session_state.display_name)
                         
-                        # Native standard mailto builder
                         mail_subject = f"ContextAI Reflection Workbook - {session['timestamp']}"
                         mail_body = f"Find my completed ContextAI personal reflections below:\n\n{md_content}"
                         
@@ -624,7 +608,6 @@ else:
                             unsafe_allow_code=True
                         )
                         
-                    # Copy to Clipboard code container
                     st.write("")
                     st.caption("📋 **One-Click Clipboard Export:** Click the copy button in the top-right of the box below to export your entire workbook:")
                     st.code(md_content, language="markdown")
@@ -632,7 +615,6 @@ else:
                     st.markdown("---")
                     st.subheader("📝 Secure Reflection Notebook")
                     
-                    # Individual question answers
                     for idx, q in enumerate(session['questions']):
                         st.markdown(f"##### Q{idx + 1}: {q['category']}")
                         st.info(q['question_text'])
@@ -649,7 +631,6 @@ else:
                         )
                         
                         if st.button("Save Secure Reflection", key=f"btn_save_{session['id']}_{idx}"):
-                            # Update answer securely with symmetric encryption encryption key
                             update_journal_entry(
                                 session["id"], 
                                 idx, 
