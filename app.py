@@ -301,7 +301,6 @@ if "current_response" not in st.session_state:
 # Memory Retention Profile Dictionary
 if "form_defaults" not in st.session_state:
     st.session_state.form_defaults = {
-        # Robust Dynamic Fallbacks: Grabs the exact first structural string element inside your models
         "life_stage": list(LifeStage)[0].value if list(LifeStage) else "",
         "living_situation": list(LivingSituation)[0].value if list(LivingSituation) else "",
         "professional_focus": "",
@@ -408,22 +407,54 @@ else:
             with st.form("intake_survey"):
                 st.header("1. Your Baseline")
                 
-                # Fetch default indexes safely
-                life_stage_options = [e.value for e in LifeStage]
-                default_life_stage_idx = life_stage_options.index(st.session_state.form_defaults["life_stage"]) if st.session_state.form_defaults["life_stage"] in life_stage_options else 0
-                life_stage_val = st.selectbox("What is your current life stage?", life_stage_options, index=default_life_stage_idx)
+                # Type-Safe Life Stage Selectbox Configuration
+                life_stage_options = list(LifeStage)
+                try:
+                    default_life_stage = LifeStage(st.session_state.form_defaults["life_stage"])
+                    default_life_stage_idx = life_stage_options.index(default_life_stage)
+                except (ValueError, KeyError):
+                    default_life_stage_idx = 0
+
+                selected_life_stage_enum = st.selectbox(
+                    "What is your current life stage?", 
+                    options=life_stage_options, 
+                    index=default_life_stage_idx,
+                    format_func=lambda e: e.value
+                )
                 
-                living_options = [e.value for e in LivingSituation]
-                default_living_idx = living_options.index(st.session_state.form_defaults["living_situation"]) if st.session_state.form_defaults["living_situation"] in living_options else 0
-                living_sit_val = st.selectbox("What is your primary living situation?", living_options, index=default_living_idx)
+                # Type-Safe Living Situation Selectbox Configuration
+                living_options = list(LivingSituation)
+                try:
+                    default_living = LivingSituation(st.session_state.form_defaults["living_situation"])
+                    default_living_idx = living_options.index(default_living)
+                except (ValueError, KeyError):
+                    default_living_idx = 0
+
+                selected_living_enum = st.selectbox(
+                    "What is your primary living situation?", 
+                    options=living_options, 
+                    index=default_living_idx,
+                    format_func=lambda e: e.value
+                )
                 
                 prof_focus_val = st.text_input("What is your primary professional/daily focus?", value=st.session_state.form_defaults["professional_focus"], placeholder="e.g., Cybersecurity, Developer, Creative")
                 
                 st.header("2. Relationship Architecture")
                 
-                rel_options = [e.value for e in RelationshipStatus]
-                default_rel_idx = rel_options.index(st.session_state.form_defaults["relationship_status"]) if st.session_state.form_defaults["relationship_status"] in rel_options else 0
-                rel_status_val = st.selectbox("What is your relationship status?", rel_options, index=default_rel_idx)
+                # Type-Safe Relationship Status Selectbox Configuration
+                rel_options = list(RelationshipStatus)
+                try:
+                    default_rel = RelationshipStatus(st.session_state.form_defaults["relationship_status"])
+                    default_rel_idx = rel_options.index(default_rel)
+                except (ValueError, KeyError):
+                    default_rel_idx = 0
+
+                selected_relationship_enum = st.selectbox(
+                    "What is your relationship status?", 
+                    options=rel_options, 
+                    index=default_rel_idx,
+                    format_func=lambda e: e.value
+                )
                 
                 has_dep_val = st.checkbox("Do you manage custody, children, or dependents?", value=st.session_state.form_defaults["has_dependents"])
                 custody_details_val = st.text_input("Optional family or custody dynamics context (e.g. co-parenting split weeks):", value=st.session_state.form_defaults["custody_details"])
@@ -453,15 +484,16 @@ else:
                     else:
                         parse_list = lambda s: [item.strip() for item in s.split(",") if item.strip()] if s else []
                         
+                        # Type-safe parsing avoids the validation engine mapping mismatch
                         profile = UserContextProfile(
                             name=st.session_state.display_name,
                             baseline=BaselineProfile(
-                                life_stage=LifeStage(life_stage_val),
-                                living_situation=LivingSituation(living_sit_val),
+                                life_stage=selected_life_stage_enum,
+                                living_situation=selected_living_enum,
                                 professional_focus=prof_focus_val
                             ),
                             relationships=RelationshipProfile(
-                                status=RelationshipStatus(rel_status_val),
+                                status=selected_relationship_enum,
                                 has_dependents=has_dep_val,
                                 custody_details=custody_details_val if custody_details_val else None,
                                 key_pillars=parse_list(key_pillars_input)
@@ -476,10 +508,10 @@ else:
                         )
                         
                         st.session_state.form_defaults = {
-                            "life_stage": life_stage_val,
-                            "living_situation": living_sit_val,
+                            "life_stage": selected_life_stage_enum.value,
+                            "living_situation": selected_living_enum.value,
                             "professional_focus": prof_focus_val,
-                            "relationship_status": rel_status_val,
+                            "relationship_status": selected_relationship_enum.value,
                             "has_dependents": has_dep_val,
                             "custody_details": custody_details_val,
                             "key_pillars": key_pillars_input,
