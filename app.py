@@ -393,7 +393,7 @@ else:
     # ==========================================
     with tab_generate:
         if not st.session_state.survey_submitted:
-            st.write("Tell us about your current baseline. No generic prompt builders here. This data remains fully encrypted on your local machine.")
+            st.write("Tell us about your lifestyle.")
             
             with st.form("intake_survey"):
                 st.header("1. Your Baseline")
