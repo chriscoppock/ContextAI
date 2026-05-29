@@ -660,7 +660,7 @@ else:
                             f'<a href="{mailto_link}" style="text-decoration:none;">'
                             '<button style="width:100%; border:1px solid #d3d3d3; padding:6px; border-radius:4px; background-color:#fcfcfc; cursor:pointer;">'
                             '📧 Share Reflection Workbook via Email</button></a>',
-                            unsafe_allow_code=True
+                            unsafe_allow_html=True
                         )
                         
                     st.write("")
