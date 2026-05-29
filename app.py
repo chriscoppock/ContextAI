@@ -3,6 +3,7 @@ import json
 import os
 import urllib.parse
 import uuid
+import hashlib
 from datetime import datetime
 from models import (
     LifeStage, 
@@ -16,8 +17,113 @@ from models import (
 )
 from prompt_engine import PromptEngine
 
-# Path for the local JSON history file
+# ==========================================
+# CONFIGURATION & FILE PATHS
+# ==========================================
 HISTORY_FILE = "context_history.json"
+USER_DB_FILE = "users.json"
+
+# ==========================================
+# SECURITY & AUTHENTICATION UTILITIES
+# ==========================================
+def hash_password(password: str, salt: bytes = None) -> tuple[str, str]:
+    """
+    Hashes a password securely using PBKDF2-HMAC-SHA256 with a randomized salt.
+    Returns (hex_hash, hex_salt).
+    """
+    if salt is None:
+        salt = os.urandom(16)
+    # Perform 100,000 iterations of SHA-256 (industry secure standard)
+    hashed_key = hashlib.pbkdf2_hmac(
+        'sha256', 
+        password.encode('utf-8'), 
+        salt, 
+        100000
+    )
+    return hashed_key.hex(), salt.hex()
+
+def verify_password(password: str, stored_hash: str, stored_salt_hex: str) -> bool:
+    """Verifies a password against the stored secure PBKDF2 hash."""
+    salt = bytes.fromhex(stored_salt_hex)
+    new_hash, _ = hash_password(password, salt)
+    return new_hash == stored_hash
+
+def load_users() -> dict:
+    """Loads authenticated users from the secure credentials database."""
+    if not os.path.exists(USER_DB_FILE):
+        return {}
+    try:
+        with open(USER_DB_FILE, "r") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+def save_users(users: dict):
+    """Saves updated user credentials to the database."""
+    with open(USER_DB_FILE, "w") as f:
+        json.dump(users, f, indent=4)
+
+def register_user(username: str, password: str) -> tuple[bool, str]:
+    """
+    Registers a new user. Checks for existing matching user records 
+    in history to preserve legacy journals.
+    """
+    users = load_users()
+    clean_username = username.strip().lower()
+    display_name = username.strip()
+    
+    if not clean_username or not password:
+        return False, "Username and password cannot be blank."
+        
+    if clean_username in users:
+        return False, "This username is already taken."
+        
+    # Generate cryptographic hash
+    hashed_pass, salt = hash_password(password)
+    
+    # Backward compatibility logic: Match legacy history by name if it exists
+    matched_uid = None
+    all_history = load_history()
+    for session in all_history:
+        baseline_name = session.get("profile_details", {}).get("baseline", {}).get("name", "")
+        if baseline_name.strip().lower() == clean_username:
+            matched_uid = session.get("user_id")
+            break
+            
+    # Fallback to generating a brand-new clean 8-character ID
+    user_id = matched_uid if matched_uid else str(uuid.uuid4())[:8]
+    
+    users[clean_username] = {
+        "display_name": display_name,
+        "password_hash": hashed_pass,
+        "salt": salt,
+        "user_id": user_id
+    }
+    
+    save_users(users)
+    return True, user_id
+
+def authenticate_user(username: str, password: str) -> tuple[bool, str, str]:
+    """
+    Verifies user credentials.
+    Returns (success_status, user_id, display_name).
+    """
+    users = load_users()
+    clean_username = username.strip().lower()
+    
+    if clean_username not in users:
+        return False, "", ""
+        
+    user_data = users[clean_username]
+    is_valid = verify_password(
+        password, 
+        user_data["password_hash"], 
+        user_data["salt"]
+    )
+    
+    if is_valid:
+        return True, user_data["user_id"], user_data["display_name"]
+    return False, "", ""
 
 # ==========================================
 # LOCAL DATABASE HELPER FUNCTIONS
@@ -31,19 +137,6 @@ def load_history():
             return json.load(f)
     except Exception:
         return []
-
-def get_unique_users():
-    """Extracts unique users registered in the history logs to populate the login dashboard."""
-    history = load_history()
-    users = {}
-    for session in history:
-        prof_details = session.get("profile_details", {})
-        baseline = prof_details.get("baseline", {})
-        u_id = session.get("user_id")
-        u_name = baseline.get("name")
-        if u_id and u_name and u_id not in users:
-            users[u_id] = u_name
-    return users
 
 def save_session_to_history(profile: UserContextProfile, user_id: str, curated_questions):
     """Saves a newly generated reflection session to the history database linked to a specific user_id."""
@@ -209,64 +302,46 @@ if "active_user_name" not in st.session_state:
     st.session_state.active_user_name = None
 
 # ==========================================
-# PHASE 1: LOGIN PORTAL (CRITICAL)
+# PHASE 1: LOGIN PORTAL (CRITICAL ENFORCED AUTH)
 # ==========================================
 if st.session_state.active_user_id is None:
-    st.title("🧩 Welcome to ContextAI")
-    st.subheader("Questions shaped by your story.")
-    st.write("Before we begin, please select your profile or register a new identity to keep your reflections private.")
-
-    existing_users = get_unique_users()
+    st.title("🧩 ContextAI Portal")
+    st.subheader("Sign in to your private reflection vault.")
     
-    # Render layout blocks for active user management
-    col_select, col_new = st.columns(2)
+    auth_mode = st.radio("Choose an option:", ["Sign In", "Register New Account"], horizontal=True)
     
-    with col_select:
-        st.markdown("### 👥 Use an Existing Profile")
-        if not existing_users:
-            st.info("No saved profiles found. Use the form on the right to start your first session!")
-        else:
-            selected_user_id = st.selectbox(
-                "Choose your name:", 
-                options=list(existing_users.keys()), 
-                format_func=lambda uid: existing_users[uid]
-            )
-            if st.button("Log In as Selected User", use_container_width=True):
-                st.session_state.active_user_id = selected_user_id
-                st.session_state.active_user_name = existing_users[selected_user_id]
-                # Pre-fill form values with user's most recent session if available
-                user_sessions = [s for s in load_history() if s.get("user_id") == selected_user_id]
-                if user_sessions:
-                    populate_form_defaults(user_sessions[0]["profile_details"])
-                st.rerun()
-
-    with col_new:
-        st.markdown("### ➕ Create a New Profile")
-        new_name_input = st.text_input("Enter your name or preferred nickname:", placeholder="e.g., Chris, Sarah, Alex")
-        if st.button("Create Profile & Start", use_container_width=True):
-            if not new_name_input.strip():
-                st.error("Please enter a valid nickname to continue.")
+    with st.form("auth_form"):
+        username_input = st.text_input("Username / Nickname:")
+        password_input = st.text_input("Password:", type="password")
+        
+        submit_btn = st.form_submit_button("Submit")
+        
+        if submit_btn:
+            if auth_mode == "Sign In":
+                success, user_id, display_name = authenticate_user(username_input, password_input)
+                if success:
+                    st.session_state.active_user_id = user_id
+                    st.session_state.active_user_name = display_name
+                    
+                    # Pre-fill form values with user's most recent session if available
+                    user_sessions = [s for s in load_history() if s.get("user_id") == user_id]
+                    if user_sessions:
+                        populate_form_defaults(user_sessions[0]["profile_details"])
+                    
+                    st.success("Successfully logged in!")
+                    st.rerun()
+                else:
+                    st.error("Invalid username or password. Please try again.")
             else:
-                generated_uid = str(uuid.uuid4())[:8] # Clean 8-char identifier
-                st.session_state.active_user_id = generated_uid
-                st.session_state.active_user_name = new_name_input.strip()
-                # Initialize custom form defaults for this brand new user
-                st.session_state.form_defaults = {
-                    "name": new_name_input.strip(),
-                    "life_stage": LifeStage.EARLY_20S.value,
-                    "living_situation": LivingSituation.RENT_TOWNHOUSE.value,
-                    "professional_focus": "",
-                    "status": RelationshipStatus.SINGLE.value,
-                    "has_dependents": False,
-                    "custody_details": "",
-                    "key_pillars": "",
-                    "creative_technical": "",
-                    "recreation_unwinding": "",
-                    "daily_rituals": "",
-                    "primary_themes": [],
-                    "additional_notes": ""
-                }
-                st.rerun()
+                # Registration Path
+                if len(password_input) < 6:
+                    st.error("For security, passwords must be at least 6 characters.")
+                else:
+                    success, result_msg = register_user(username_input, password_input)
+                    if success:
+                        st.success("Account successfully created! Please toggle to 'Sign In' to log in.")
+                    else:
+                        st.error(result_msg)
 
 # ==========================================
 # PHASE 2: PRIMARY OPERATION DASHBOARD
@@ -274,8 +349,8 @@ if st.session_state.active_user_id is None:
 else:
     # Sidebar control module
     st.sidebar.markdown(f"### 👤 Logged in as:")
-    st.sidebar.success(f"**{st.session_state.active_user_name}** (ID: {st.session_state.active_user_id})")
-    if st.sidebar.button("🚪 Switch/Log Out of Profile"):
+    st.sidebar.success(f"**{st.session_state.active_user_name}**")
+    if st.sidebar.button("🚪 Log Out of Profile"):
         st.session_state.active_user_id = None
         st.session_state.active_user_name = None
         st.session_state.survey_submitted = False
