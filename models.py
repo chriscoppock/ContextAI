@@ -5,6 +5,7 @@ from pydantic import BaseModel, Field
 class LifeStage(str, Enum):
     EARLY_20S = "Early 20s"
     LATE_20S_EARLY_30S = "Late 20s to Early 30s"
+    MID_30S_EARLY_40S = "Mid 30s to Early 40s"
     MID_40S = "Mid 40s"
     FIFTIES_PLUS = "50s or beyond"
 

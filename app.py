@@ -1,8 +1,11 @@
 import streamlit as st
 import json
 import os
+import re
+import hmac
 import hashlib
 import base64
+import urllib.parse
 from datetime import datetime
 
 # Secure Cryptographic Imports
@@ -91,7 +94,9 @@ def register_user(username, display_name, password):
     """Registers a new user, deriving cryptographic hashes and salts securely."""
     users = load_users()
     clean_username = username.strip().lower()
-    
+
+    if not re.fullmatch(r"[a-z0-9]+", clean_username):
+        return False, "Username must contain only letters and numbers."
     if clean_username in users:
         return False, "Username is already taken."
         
@@ -123,7 +128,7 @@ def authenticate_user(username, password):
     salt_hex = user_record["salt"]
     target_hash = hash_password(password, salt_hex)
     
-    if target_hash == user_record["password_hash"]:
+    if hmac.compare_digest(target_hash, user_record["password_hash"]):
         encryption_key = derive_encryption_key(password, salt_hex)
         return {
             "user_id": user_record["user_id"],
@@ -336,7 +341,6 @@ if not st.session_state.logged_in:
                         st.session_state.username = user_data["username"]
                         st.session_state.display_name = user_data["display_name"]
                         st.session_state.encryption_key = user_data["encryption_key"]
-                        st.success(f"Hello, {user_data['display_name']}!")
                         st.rerun()
                         
     else:
@@ -352,6 +356,8 @@ if not st.session_state.logged_in:
             if btn_register:
                 if not reg_username or not reg_display or not reg_pass:
                     st.error("All credentials are required.")
+                elif len(reg_pass) < 8:
+                    st.error("Password must be at least 8 characters long.")
                 elif reg_pass != reg_pass_conf:
                     st.error("Passwords do not match.")
                 else:
@@ -365,7 +371,6 @@ if not st.session_state.logged_in:
                         st.session_state.username = reg_username.lower()
                         st.session_state.display_name = result["display_name"]
                         st.session_state.encryption_key = derived_key
-                        st.success("Account created securely! Launching platform...")
                         st.rerun()
 
 # ==========================================
@@ -642,7 +647,6 @@ else:
                             st.session_state.survey_submitted = False
                             st.session_state.user_profile = None
                             st.session_state.current_response = None
-                            st.success("Prior profile metrics loaded into editor! Swap tabs to tweak themes.")
                             st.rerun()
                             
                     with col2:
@@ -651,7 +655,6 @@ else:
                         mail_subject = f"ContextAI Reflection Workbook - {session['timestamp']}"
                         mail_body = f"Find my completed ContextAI personal reflections below:\n\n{md_content}"
                         
-                        import urllib.parse
                         encoded_subject = urllib.parse.quote(mail_subject)
                         encoded_body = urllib.parse.quote(mail_body)
                         mailto_link = f"mailto:?subject={encoded_subject}&body={encoded_body}"

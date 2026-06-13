@@ -90,7 +90,9 @@ class PromptEngine:
         user_prompt = PromptEngine.generate_user_prompt(profile)
 
         # List of models to try in sequence if a severe 503 spike occurs
-        model_queue = [model_name, "gemini-2.5-flash-lite"]
+        model_queue = [model_name]
+        if model_name != "gemini-2.5-flash-lite":
+            model_queue.append("gemini-2.5-flash-lite")
         last_error = None
 
         for active_model in model_queue:
@@ -108,6 +110,11 @@ class PromptEngine:
                         ),
                     )
 
+                    if response.text is None:
+                        raise ValueError(
+                            f"Model '{active_model}' returned an empty response "
+                            "(possibly blocked by safety filters)."
+                        )
                     raw_content = response.text.strip()
 
                     # Debug console logs
@@ -127,10 +134,7 @@ class PromptEngine:
                         time.sleep(delay)
                     else:
                         # Reraise other severe client errors instantly (like authentications or 404s)
-                        raise e
-                except Exception as e:
-                    last_error = e
-                    raise e
+                        raise
 
             # If we completed all attempts for this model, warn user and switch to fallback model
             st.info(f"🔄 Swapping model queue from '{active_model}' to fallback model...")
