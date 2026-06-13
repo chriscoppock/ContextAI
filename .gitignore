@@ -1,0 +1,7 @@
+__pycache__/
+.venv/
+.streamlit/secrets.toml
+
+# Legacy local-file storage (pre-Supabase)
+users.json
+context_history.json
