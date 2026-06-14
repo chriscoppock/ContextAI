@@ -153,6 +153,14 @@ if "display_name" not in st.session_state:
     st.session_state.display_name = None
 if "encryption_key" not in st.session_state:
     st.session_state.encryption_key = None
+if "encryption_salt" not in st.session_state:
+    st.session_state.encryption_salt = None
+
+# Forgot-password flow state
+if "reset_stage" not in st.session_state:
+    st.session_state.reset_stage = None
+if "reset_email" not in st.session_state:
+    st.session_state.reset_email = None
 
 # Track generation workflow states
 if "survey_submitted" not in st.session_state:
@@ -183,13 +191,16 @@ if "form_defaults" not in st.session_state:
         "additional_notes": ""
     }
 
-def complete_login(user_id, email, display_name, encryption_key):
+def complete_login(user_id, email, display_name, encryption_key, encryption_salt):
     """Populates session state after a successful Supabase sign-in."""
     st.session_state.logged_in = True
     st.session_state.user_id = user_id
     st.session_state.email = email
     st.session_state.display_name = display_name
     st.session_state.encryption_key = encryption_key
+    st.session_state.encryption_salt = encryption_salt
+    st.session_state.reset_stage = None
+    st.session_state.reset_email = None
 
 # ==========================================
 # GUEST / SECURE PORTAL INTERFACE
@@ -199,7 +210,7 @@ if not st.session_state.logged_in:
     st.write("Welcome to your private prompt refinery. Sign in to load and encrypt your customized journals.")
 
     supabase = db.get_supabase()
-    auth_mode = st.radio("Choose Action", ["Sign In", "Register Private Profile"], horizontal=True)
+    auth_mode = st.radio("Choose Action", ["Sign In", "Register Private Profile", "Reset Forgotten Password"], horizontal=True)
 
     if auth_mode == "Sign In":
         with st.form("login_form"):
@@ -224,11 +235,12 @@ if not st.session_state.logged_in:
                                 auth_res.user.id,
                                 email_input,
                                 profile["display_name"],
-                                encryption_key
+                                encryption_key,
+                                profile["encryption_salt"]
                             )
                             st.rerun()
 
-    else:
+    elif auth_mode == "Register Private Profile":
         with st.form("register_form"):
             st.info(
                 "Your password is cryptographically combined with a randomized salt to encrypt your journal data. "
@@ -267,9 +279,86 @@ if not st.session_state.logged_in:
                                 auth_res.user.id,
                                 reg_email,
                                 profile["display_name"],
-                                encryption_key
+                                encryption_key,
+                                profile["encryption_salt"]
                             )
                             st.rerun()
+
+    else:  # Reset Forgotten Password
+        st.warning(
+            "⚠️ **Read this first:** your journals are encrypted with a key derived from your password. "
+            "Resetting a *forgotten* password restores access to your account, but **existing journal "
+            "entries will become unreadable** — we never have the key to decrypt them. "
+            "(If you simply want a new password and still know your current one, sign in and use "
+            "**Change Password** in the sidebar instead — that path re-encrypts everything with no data loss.)"
+        )
+
+        if st.session_state.reset_stage != "verify":
+            with st.form("reset_request_form"):
+                reset_email_input = st.text_input("Account Email").strip()
+                btn_send_code = st.form_submit_button("Email Me a Reset Code")
+
+                if btn_send_code:
+                    if not reset_email_input:
+                        st.error("Please enter your account email.")
+                    else:
+                        error_msg = db.request_password_reset(supabase, reset_email_input)
+                        if error_msg:
+                            st.error(error_msg)
+                        else:
+                            st.session_state.reset_stage = "verify"
+                            st.session_state.reset_email = reset_email_input
+                            st.rerun()
+        else:
+            st.info(
+                f"📨 A reset email was sent to **{st.session_state.reset_email}** (if an account exists for it).\n\n"
+                "**Important — do not click the link in the email.** Instead, right-click the "
+                "\"Reset Password\" link/button, choose **Copy Link Address**, and paste the whole "
+                "link below. (Clicking it consumes the token on a page that can't complete the reset.)"
+            )
+
+            with st.form("reset_verify_form"):
+                otp_code = st.text_input("Pasted Reset Link (or reset code, if your email contains one)").strip()
+                new_pass = st.text_input("New Password (8+ characters)", type="password")
+                new_pass_conf = st.text_input("Confirm New Password", type="password")
+                btn_reset = st.form_submit_button("Reset Password & Sign In")
+
+                if btn_reset:
+                    if not otp_code or not new_pass:
+                        st.error("All fields are required.")
+                    elif len(new_pass) < 8:
+                        st.error("Password must be at least 8 characters long.")
+                    elif new_pass != new_pass_conf:
+                        st.error("Passwords do not match.")
+                    else:
+                        auth_res, error_msg = db.verify_recovery_code(
+                            supabase, st.session_state.reset_email, otp_code
+                        )
+                        if error_msg:
+                            st.error(f"Code verification failed: {error_msg}")
+                        else:
+                            error_msg = db.update_password(supabase, new_pass)
+                            if error_msg:
+                                st.error(f"Password update failed: {error_msg}")
+                            else:
+                                profile = db.fetch_profile(supabase, auth_res.user.id)
+                                if profile is None:
+                                    st.error("Password was reset, but no profile was found. Try signing in normally.")
+                                else:
+                                    encryption_key = derive_encryption_key(new_pass, profile["encryption_salt"])
+                                    complete_login(
+                                        auth_res.user.id,
+                                        st.session_state.reset_email,
+                                        profile["display_name"],
+                                        encryption_key,
+                                        profile["encryption_salt"]
+                                    )
+                                    st.rerun()
+
+            if st.button("↩️ Start over with a different email"):
+                st.session_state.reset_stage = None
+                st.session_state.reset_email = None
+                st.rerun()
 
 # ==========================================
 # SECURE LOGGED-IN PLATFORM WORKSPACE
@@ -287,6 +376,79 @@ else:
         for key in list(st.session_state.keys()):
             del st.session_state[key]
         st.rerun()
+
+    with st.sidebar.expander("🔑 Change Password"):
+        st.caption("Your journals will be decrypted and re-encrypted with the new password. No data is lost.")
+        with st.form("change_password_form"):
+            current_pass = st.text_input("Current Password", type="password")
+            change_new_pass = st.text_input("New Password (8+ characters)", type="password")
+            change_new_conf = st.text_input("Confirm New Password", type="password")
+            btn_change = st.form_submit_button("Re-Encrypt & Update")
+
+            if btn_change:
+                old_key = st.session_state.encryption_key
+                salt = st.session_state.encryption_salt
+
+                if not current_pass or not change_new_pass:
+                    st.error("All fields are required.")
+                elif derive_encryption_key(current_pass, salt) != old_key:
+                    st.error("Current password is incorrect.")
+                elif len(change_new_pass) < 8:
+                    st.error("New password must be at least 8 characters long.")
+                elif change_new_pass == current_pass:
+                    st.error("New password must be different from the current one.")
+                elif change_new_pass != change_new_conf:
+                    st.error("New passwords do not match.")
+                else:
+                    # Decrypt every session up-front so a bad key can't strand us mid-rewrite
+                    rows = db.fetch_sessions(supabase, st.session_state.user_id)
+                    decrypted_rows = []
+                    skipped = 0
+                    for row in rows:
+                        try:
+                            decrypted_rows.append((
+                                row["id"],
+                                decrypt_data(row["profile_details"], old_key),
+                                decrypt_data(row["questions"], old_key),
+                                decrypt_data(row["journal_entries"], old_key),
+                            ))
+                        except Exception:
+                            # Sessions orphaned by a past forgotten-password reset stay as-is
+                            skipped += 1
+
+                    error_msg = db.update_password(supabase, change_new_pass)
+                    if error_msg:
+                        st.error(f"Password update failed (no data was changed): {error_msg}")
+                    else:
+                        new_key = derive_encryption_key(change_new_pass, salt)
+                        failed_ids = []
+                        for session_id, dec_profile, dec_questions, dec_journals in decrypted_rows:
+                            enc_payloads = (
+                                encrypt_data(dec_profile, new_key),
+                                encrypt_data(dec_questions, new_key),
+                                encrypt_data(dec_journals, new_key),
+                            )
+                            # One automatic retry per row before giving up
+                            for attempt in range(2):
+                                try:
+                                    db.update_session_payloads(supabase, session_id, *enc_payloads)
+                                    break
+                                except Exception:
+                                    if attempt == 1:
+                                        failed_ids.append(session_id)
+
+                        st.session_state.encryption_key = new_key
+                        if failed_ids:
+                            st.error(
+                                f"Password changed, but {len(failed_ids)} session(s) could not be rewritten "
+                                "and remain encrypted under your OLD password. They will show as unreadable "
+                                "until rewritten — keep your old password noted somewhere safe."
+                            )
+                        else:
+                            msg = "Password changed and all journals re-encrypted!"
+                            if skipped:
+                                msg += f" ({skipped} previously unreadable session(s) were left untouched.)"
+                            st.success(msg)
 
     st.title("🧩 ContextAI")
     st.subheader(f"Questions shaped by your story, {st.session_state.display_name}.")

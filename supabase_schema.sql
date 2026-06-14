@@ -21,6 +21,8 @@ create policy "Users can read own profile"
     using (auth.uid() = id);
 
 -- Auto-create a profile (with a random encryption salt) for every new auth user
+-- Note: gen_random_bytes lives in the "extensions" schema on Supabase,
+-- so it must be schema-qualified here (the pinned search_path hides it).
 create or replace function public.handle_new_user()
 returns trigger
 language plpgsql
@@ -31,7 +33,7 @@ begin
     values (
         new.id,
         coalesce(new.raw_user_meta_data ->> 'display_name', 'Friend'),
-        encode(gen_random_bytes(16), 'hex')
+        encode(extensions.gen_random_bytes(16), 'hex')
     );
     return new;
 end;

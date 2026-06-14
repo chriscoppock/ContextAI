@@ -73,6 +73,55 @@ def sign_out_user(client: Client):
         pass
 
 
+def request_password_reset(client: Client, email: str):
+    """Asks Supabase to email a recovery code. Returns an error message or None.
+
+    Note: Supabase intentionally reports success even for unregistered emails,
+    to prevent account enumeration.
+    """
+    try:
+        client.auth.reset_password_for_email(email)
+        return None
+    except Exception as e:
+        return getattr(e, "message", str(e))
+
+
+def verify_recovery_code(client: Client, email: str, code_or_link: str):
+    """Exchanges an emailed recovery code OR a pasted recovery link for an authenticated session.
+
+    The default Supabase reset email only contains a link (templates can't be
+    customized without custom SMTP), so we also accept the full link and pull
+    the token hash out of its query string.
+
+    Returns (auth_response, error_message).
+    """
+    code_or_link = code_or_link.strip()
+    if "token=" in code_or_link:
+        from urllib.parse import urlparse, parse_qs
+        query = parse_qs(urlparse(code_or_link).query)
+        token_hash = (query.get("token") or [None])[0]
+        if not token_hash:
+            return None, "Couldn't find a token in that link. Paste the full reset link from the email."
+        params = {"token_hash": token_hash, "type": "recovery"}
+    else:
+        params = {"email": email, "token": code_or_link, "type": "recovery"}
+
+    try:
+        res = client.auth.verify_otp(params)
+        return res, None
+    except Exception as e:
+        return None, getattr(e, "message", str(e))
+
+
+def update_password(client: Client, new_password: str):
+    """Sets a new password for the currently authenticated user. Returns an error message or None."""
+    try:
+        client.auth.update_user({"password": new_password})
+        return None
+    except Exception as e:
+        return getattr(e, "message", str(e))
+
+
 def fetch_profile(client: Client, user_id: str):
     """Fetches the user's profile row (display name + encryption salt)."""
     res = client.table("profiles").select("*").eq("id", user_id).execute()
@@ -110,6 +159,16 @@ def update_session_journals(client: Client, session_id: str, enc_journals: str):
     client.table("reflection_sessions").update(
         {"journal_entries": enc_journals}
     ).eq("id", session_id).execute()
+
+
+def update_session_payloads(client: Client, session_id: str,
+                            enc_profile: str, enc_questions: str, enc_journals: str):
+    """Rewrites all encrypted columns of a session (used for password-change re-encryption)."""
+    client.table("reflection_sessions").update({
+        "profile_details": enc_profile,
+        "questions": enc_questions,
+        "journal_entries": enc_journals,
+    }).eq("id", session_id).execute()
 
 
 # ==========================================
